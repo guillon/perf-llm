@@ -51,6 +51,17 @@ python bench.py \
   --warmup-runs 1
 ```
 
+Omit a setting from requests when needed:
+
+```bash
+python bench.py \
+  --provider openai \
+  --base-url http://localhost:8000 \
+  --model my-model \
+  --no-temperature \
+  --no-max-tokens
+```
+
 Benchmark an Ollama endpoint:
 
 ```bash
@@ -59,7 +70,8 @@ python bench.py \
   --base-url http://localhost:11434 \
   --model llama3 \
   --concurrency 1,2,4 \
-  --warmup-runs 1
+  --warmup-runs 1 \
+  --ctx-size 8192
 ```
 
 List models:
@@ -74,6 +86,14 @@ Enable debug logs:
 ```bash
 python bench.py --provider ollama --base-url http://localhost:11434 --list-models --debug
 ```
+
+Notes:
+
+- `--max-tokens` and `--temperature` default to `1024` and `1.0`.
+- Use `--no-max-tokens` or `--no-temperature` to omit them from requests.
+- `--ctx-size` is applied when supported by the target API.
+- For Ollama, it is sent as `options.num_ctx`.
+- If a setting is ignored by a provider, the tool prints a warning on stderr.
 
 ## Development
 

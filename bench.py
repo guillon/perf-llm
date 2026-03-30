@@ -111,6 +111,10 @@ def debug_log(enabled: bool, message: str) -> None:
         print(f"[debug] {message}", file=sys.stderr)
 
 
+def warn_log(message: str) -> None:
+    print(f"[warn] {message}", file=sys.stderr)
+
+
 def make_headers(provider: str, api_key: str | None) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if provider == "openai" and api_key:
@@ -133,29 +137,38 @@ def make_request_payload(
     provider: str,
     model: str,
     prompt: str,
-    max_tokens: int,
-    temperature: float,
+    max_tokens: int | None,
+    temperature: float | None,
     thinking_level: str | None,
     thinking_key: str,
+    ctx_size: int | None,
     extra_body_json: str | None,
 ) -> dict[str, Any]:
     if provider == "openai":
+        if ctx_size is not None:
+            warn_log("Ignoring --ctx-size for provider=openai: no standard chat/completions field")
         body: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
             "stream": False,
         }
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        if temperature is not None:
+            body["temperature"] = temperature
     elif provider == "ollama":
+        options: dict[str, Any] = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens is not None:
+            options["num_predict"] = max_tokens
+        if ctx_size is not None:
+            options["num_ctx"] = ctx_size
         body = {
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
-            },
+            "options": options,
         }
     else:
         raise ValueError(f"Unsupported provider: {provider}")
@@ -317,8 +330,9 @@ async def run_point(
     rounds: int,
     thinking_level: str | None,
     thinking_key: str,
-    max_tokens: int,
-    temperature: float,
+    max_tokens: int | None,
+    temperature: float | None,
+    ctx_size: int | None,
     timeout_s: float,
     extra_body_json: str | None,
     verbose: bool,
@@ -339,6 +353,7 @@ async def run_point(
         temperature=temperature,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
+        ctx_size=ctx_size,
         extra_body_json=extra_body_json,
     )
 
@@ -470,8 +485,9 @@ async def run_warmup(
     prompt: str,
     thinking_level: str | None,
     thinking_key: str,
-    max_tokens: int,
-    temperature: float,
+    max_tokens: int | None,
+    temperature: float | None,
+    ctx_size: int | None,
     timeout_s: float,
     extra_body_json: str | None,
     warmup_runs: int,
@@ -494,6 +510,7 @@ async def run_warmup(
         temperature=temperature,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
+        ctx_size=ctx_size,
         extra_body_json=extra_body_json,
     )
 
@@ -546,7 +563,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--thinking-level", default=None)
     parser.add_argument("--thinking-key", default="thinking_level")
     parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--no-max-tokens", action="store_true")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--no-temperature", action="store_true")
+    parser.add_argument("--ctx-size", type=int)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--extra-body-json", default=None)
     parser.add_argument("--output-json")
@@ -571,6 +591,9 @@ async def async_main(args: argparse.Namespace) -> int:
     if not args.model:
         raise SystemExit("--model is required unless --list-models is used")
 
+    effective_max_tokens = None if args.no_max_tokens else args.max_tokens
+    effective_temperature = None if args.no_temperature else args.temperature
+
     prompt = load_prompt(args)
     concurrencies = parse_csv_ints(args.concurrency)
     thinking_levels = parse_csv_strings(args.thinking_level)
@@ -583,8 +606,9 @@ async def async_main(args: argparse.Namespace) -> int:
         prompt=prompt,
         thinking_level=thinking_levels[0],
         thinking_key=args.thinking_key,
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
+        max_tokens=effective_max_tokens,
+        temperature=effective_temperature,
+        ctx_size=args.ctx_size,
         timeout_s=args.timeout,
         extra_body_json=args.extra_body_json,
         warmup_runs=args.warmup_runs,
@@ -612,8 +636,9 @@ async def async_main(args: argparse.Namespace) -> int:
                 rounds=args.rounds,
                 thinking_level=thinking_level,
                 thinking_key=args.thinking_key,
-                max_tokens=args.max_tokens,
-                temperature=args.temperature,
+                max_tokens=effective_max_tokens,
+                temperature=effective_temperature,
+                ctx_size=args.ctx_size,
                 timeout_s=args.timeout,
                 extra_body_json=args.extra_body_json,
                 verbose=args.verbose,
@@ -634,8 +659,9 @@ async def async_main(args: argparse.Namespace) -> int:
                 "rounds": args.rounds,
                 "warmup_runs": args.warmup_runs,
                 "thinking_levels": thinking_levels,
-                "max_tokens": args.max_tokens,
-                "temperature": args.temperature,
+                "max_tokens": effective_max_tokens,
+                "temperature": effective_temperature,
+                "ctx_size": args.ctx_size,
                 "timeout": args.timeout,
             },
             "summaries": [asdict(s) for s in summaries],
