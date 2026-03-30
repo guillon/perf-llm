@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perf-llm"
+version = "0.1.0"
+description = "Benchmark and stress-test OpenAI-compatible and Ollama LLM completion endpoints"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Christophe Guillon", email = "christophe.guillon@inria.fr" },
+]
+dependencies = [
+  "aiohttp>=3.9",
+]
+keywords = ["llm", "benchmark", "performance", "ollama", "openai"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent",
+  "Environment :: Console",
+  "Topic :: Scientific/Engineering",
+  "Topic :: System :: Benchmark",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.11",
+  "pyright>=1.1",
+]
+viz = [
+  "rich>=13.0",
+  "pandas>=2.0",
+  "matplotlib>=3.8",
+]
+
+[project.scripts]
+perf-llm = "bench:main"
+
+[tool.setuptools]
+py-modules = ["bench"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.pyright]
+pythonVersion = "3.10"
+include = ["bench.py"]
+typeCheckingMode = "basic"
+reportMissingImports = false
