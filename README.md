@@ -33,10 +33,16 @@ pip install '.[dev]'
 
 ## Quick start
 
-Default prompt:
+Default benchmark/test prompt:
 
 ```text
-Hello, tell me a joke.
+ping
+```
+
+Default warmup prompt:
+
+```text
+ping
 ```
 
 Benchmark an OpenAI-compatible endpoint:
@@ -48,7 +54,8 @@ python bench.py \
   --model my-model \
   --concurrency 1,2,4 \
   --thinking-level low,medium,high \
-  --warmup-runs 1
+  --warmup-runs 1 \
+  --prompt-warmup ping
 ```
 
 Enable streaming in benchmark or test mode:
@@ -135,6 +142,8 @@ Notes:
 - Logging uses the standard Python logging interface.
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
 - `--debug-content` logs request and response JSON content at debug level.
+- `--prompt-warmup` sets the warmup prompt and defaults to `ping`.
+- Benchmark/test prompt defaults to `ping`.
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.
 - Use `--no-max-tokens` or `--no-temperature` to omit them from requests.
 - `--test-request` sends one payload and prints the response without running a benchmark.

@@ -85,7 +85,8 @@ def percentile(values: list[float], p: float) -> float | None:
     return values[low] * (1 - frac) + values[high] * frac
 
 
-DEFAULT_PROMPT = "Hello, tell me a joke."
+DEFAULT_PROMPT = "ping"
+DEFAULT_WARMUP_PROMPT = "ping"
 LOGGER = logging.getLogger("perf_llm")
 
 
@@ -95,6 +96,12 @@ def load_prompt(args: argparse.Namespace) -> str:
     if args.prompt_file:
         return Path(args.prompt_file).read_text(encoding="utf-8")
     return DEFAULT_PROMPT
+
+
+def load_warmup_prompt(args: argparse.Namespace, prompt: str) -> str:
+    if args.prompt_warmup is not None:
+        return args.prompt_warmup
+    return prompt
 
 
 def merge_extra_body(base: dict[str, Any], extra_json: str | None) -> dict[str, Any]:
@@ -782,6 +789,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key")
     parser.add_argument("--prompt")
     parser.add_argument("--prompt-file")
+    parser.add_argument("--prompt-warmup", default=DEFAULT_WARMUP_PROMPT)
     parser.add_argument("--concurrency", default="1")
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--warmup-runs", type=int, default=1)
@@ -824,6 +832,7 @@ async def async_main(args: argparse.Namespace) -> int:
     effective_temperature = None if args.no_temperature else args.temperature
 
     prompt = load_prompt(args)
+    warmup_prompt = load_warmup_prompt(args, prompt)
     thinking_levels = parse_csv_strings(args.thinking_level)
 
     if args.test_request:
@@ -851,7 +860,7 @@ async def async_main(args: argparse.Namespace) -> int:
         base_url=args.base_url,
         model=args.model,
         api_key=args.api_key,
-        prompt=prompt,
+        prompt=warmup_prompt,
         thinking_level=thinking_levels[0],
         thinking_key=args.thinking_key,
         max_tokens=effective_max_tokens,
