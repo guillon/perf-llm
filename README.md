@@ -81,6 +81,32 @@ python bench.py --provider openai --base-url http://localhost:8000 --list-models
 python bench.py --provider ollama --base-url http://localhost:11434 --list-models
 ```
 
+Send one test request without benchmarking:
+
+```bash
+python bench.py \
+  --provider openai \
+  --base-url http://localhost:8000 \
+  --model my-model \
+  --test-request
+```
+
+Enable streaming for test mode only:
+
+```bash
+python bench.py \
+  --provider openai \
+  --base-url http://localhost:8000 \
+  --model my-model \
+  --test-request \
+  --stream
+```
+
+This prints only:
+
+- `status: <code>`
+- `response: <raw response text>` on success
+
 Enable debug logs:
 
 ```bash
@@ -97,8 +123,11 @@ Notes:
 
 - Logging uses the standard Python logging interface.
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
+- `--debug-content` logs request and response JSON content at debug level.
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.
 - Use `--no-max-tokens` or `--no-temperature` to omit them from requests.
+- `--test-request` sends one payload and prints the response without running a benchmark.
+- `--stream` is currently supported for `--test-request` only.
 - `--ctx-size` is applied when supported by the target API.
 - For Ollama, it is sent as `options.num_ctx`.
 - If a setting is ignored by a provider, the tool prints a warning on stderr.

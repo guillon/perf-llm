@@ -116,6 +116,16 @@ def configure_logging(debug: bool, quiet: bool) -> None:
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
+def log_json_content(enabled: bool, label: str, payload: Any) -> None:
+    if not enabled:
+        return
+    try:
+        rendered = json.dumps(payload, indent=2, sort_keys=True)
+    except TypeError:
+        rendered = repr(payload)
+    LOGGER.debug("%s:\n%s", label, rendered)
+
+
 def make_headers(provider: str, api_key: str | None) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if provider == "openai" and api_key:
@@ -144,6 +154,7 @@ def make_request_payload(
     thinking_key: str,
     ctx_size: int | None,
     extra_body_json: str | None,
+    stream: bool = False,
 ) -> dict[str, Any]:
     if provider == "openai":
         if ctx_size is not None:
@@ -153,7 +164,7 @@ def make_request_payload(
         body: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
+            "stream": stream,
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -170,7 +181,7 @@ def make_request_payload(
         body = {
             "model": model,
             "prompt": prompt,
-            "stream": False,
+            "stream": stream,
             "options": options,
         }
     else:
@@ -218,6 +229,64 @@ def extract_model_names(provider: str, payload: dict[str, Any]) -> list[str]:
     return []
 
 
+def extract_stream_response_chunk(event_payload: dict[str, Any], provider: str) -> str:
+    if provider == "openai":
+        choices = event_payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return ""
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            return ""
+        content = delta.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    text_parts.append(item["text"])
+            return "".join(text_parts)
+        return ""
+    if provider == "ollama":
+        response = event_payload.get("response")
+        return response if isinstance(response, str) else ""
+    return ""
+
+
+def extract_response(response_payload: dict[str, Any], provider: str) -> str:
+    if provider == "openai":
+        choices = response_payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return ""
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    text_parts.append(item["text"])
+            return "".join(text_parts)
+        return ""
+    if provider == "ollama":
+        response = response_payload.get("response")
+        return response if isinstance(response, str) else ""
+    return ""
+
+
 async def list_models(
     *, provider: str, base_url: str, api_key: str | None, timeout_s: float
 ) -> list[str]:
@@ -242,6 +311,87 @@ async def list_models(
     return extract_model_names(provider, payload)
 
 
+async def test_request(
+    *,
+    provider: str,
+    base_url: str,
+    model: str,
+    api_key: str | None,
+    prompt: str,
+    thinking_level: str | None,
+    thinking_key: str,
+    max_tokens: int | None,
+    temperature: float | None,
+    ctx_size: int | None,
+    timeout_s: float,
+    extra_body_json: str | None,
+    debug_content: bool,
+    stream: bool,
+) -> int:
+    if aiohttp is None:
+        raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
+
+    headers = make_headers(provider, api_key)
+    url = endpoint_url(provider, base_url)
+    timeout = aiohttp.ClientTimeout(total=timeout_s)
+    payload = make_request_payload(
+        provider=provider,
+        model=model,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        thinking_level=thinking_level,
+        thinking_key=thinking_key,
+        ctx_size=ctx_size,
+        extra_body_json=extra_body_json,
+        stream=stream,
+    )
+
+    print(f"prompt: {prompt}")
+    log_json_content(debug_content, "request_json", payload)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        LOGGER.debug("POST %s", url)
+        async with session.post(url, headers=headers, json=payload) as resp:
+            if resp.status >= 400:
+                text = await resp.text()
+                LOGGER.warning("test request failed with HTTP %s", resp.status)
+                log_json_content(debug_content, "response_json", text)
+                return 1
+
+            print(f"status: {resp.status}")
+            if stream:
+                response_parts: list[str] = []
+                async for raw_line in resp.content:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    if provider == "openai":
+                        if not line.startswith("data:"):
+                            continue
+                        line = line[5:].strip()
+                        if line == "[DONE]":
+                            continue
+                    try:
+                        response_payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    log_json_content(debug_content, "response_json", response_payload)
+                    response_part = extract_stream_response_chunk(response_payload, provider)
+                    if response_part:
+                        response_parts.append(response_part)
+                print(f"response: {''.join(response_parts)}")
+            else:
+                text = await resp.text()
+                try:
+                    response_payload = json.loads(text)
+                    print(f"response: {extract_response(response_payload, provider)}")
+                except json.JSONDecodeError:
+                    response_payload = text
+                log_json_content(debug_content, "response_json", response_payload)
+    return 0
+
+
 async def one_request(
     session: Any,
     *,
@@ -252,10 +402,12 @@ async def one_request(
     concurrency: int,
     round_id: int,
     thinking_level: str | None,
+    debug_content: bool,
 ) -> RequestResult:
     start = time.perf_counter()
     try:
         LOGGER.debug("POST %s", url)
+        log_json_content(debug_content, "request_json", payload)
         async with session.post(url, headers=headers, json=payload) as resp:
             status = resp.status
             text = await resp.text()
@@ -289,6 +441,7 @@ async def one_request(
                     error="Invalid JSON response",
                 )
 
+            log_json_content(debug_content, "response_json", data)
             output_tokens = extract_output_tokens(provider, data)
             tokens_per_s = (
                 (output_tokens / latency_s) if output_tokens is not None and latency_s > 0 else None
@@ -338,6 +491,7 @@ async def run_point(
     timeout_s: float,
     extra_body_json: str | None,
     verbose: bool,
+    debug_content: bool,
 ) -> tuple[PointSummary, list[RequestResult]]:
     if aiohttp is None:
         raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
@@ -371,6 +525,7 @@ async def run_point(
                     concurrency=concurrency,
                     round_id=round_id,
                     thinking_level=thinking_level,
+                    debug_content=debug_content,
                 )
                 for _ in range(concurrency)
             ]
@@ -496,6 +651,7 @@ async def run_warmup(
     extra_body_json: str | None,
     warmup_runs: int,
     verbose: bool,
+    debug_content: bool,
 ) -> None:
     if warmup_runs <= 0:
         return
@@ -536,6 +692,7 @@ async def run_warmup(
                 concurrency=1,
                 round_id=-(warmup_id + 1),
                 thinking_level=thinking_level,
+                debug_content=debug_content,
             )
             if verbose or not result.ok:
                 LOGGER.warning(
@@ -563,6 +720,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List models available on the base URL and exit",
     )
+    parser.add_argument(
+        "--test-request",
+        action="store_true",
+        help="Send one request payload and print the raw response, without benchmarking",
+    )
     parser.add_argument("--api-key")
     parser.add_argument("--prompt")
     parser.add_argument("--prompt-file")
@@ -581,6 +743,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--debug-content", action="store_true")
+    parser.add_argument("--stream", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -606,8 +770,30 @@ async def async_main(args: argparse.Namespace) -> int:
     effective_temperature = None if args.no_temperature else args.temperature
 
     prompt = load_prompt(args)
-    concurrencies = parse_csv_ints(args.concurrency)
     thinking_levels = parse_csv_strings(args.thinking_level)
+
+    if args.test_request:
+        return await test_request(
+            provider=args.provider,
+            base_url=args.base_url,
+            model=args.model,
+            api_key=args.api_key,
+            prompt=prompt,
+            thinking_level=thinking_levels[0],
+            thinking_key=args.thinking_key,
+            max_tokens=effective_max_tokens,
+            temperature=effective_temperature,
+            ctx_size=args.ctx_size,
+            timeout_s=args.timeout,
+            extra_body_json=args.extra_body_json,
+            debug_content=args.debug_content,
+            stream=args.stream,
+        )
+
+    if args.stream:
+        LOGGER.warning("Ignoring --stream outside --test-request")
+
+    concurrencies = parse_csv_ints(args.concurrency)
 
     await run_warmup(
         provider=args.provider,
@@ -624,6 +810,7 @@ async def async_main(args: argparse.Namespace) -> int:
         extra_body_json=args.extra_body_json,
         warmup_runs=args.warmup_runs,
         verbose=args.verbose,
+        debug_content=args.debug_content,
     )
 
     summaries: list[PointSummary] = []
@@ -655,6 +842,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 extra_body_json=args.extra_body_json,
                 verbose=args.verbose,
+                debug_content=args.debug_content,
             )
             summaries.append(summary)
             all_results.extend(results)
