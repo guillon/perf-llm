@@ -34,6 +34,7 @@ class RequestResult:
     latency_s: float
     output_tokens: int | None
     tokens_per_s: float | None
+    stream_chunks: int | None
     status: int | None
     error: str | None
 
@@ -287,6 +288,63 @@ def extract_response(response_payload: dict[str, Any], provider: str) -> str:
     return ""
 
 
+async def collect_stream_response(
+    resp: Any, provider: str, debug_content: bool
+) -> tuple[str, dict[str, Any] | None, int]:
+    response_parts: list[str] = []
+    last_payload: dict[str, Any] | None = None
+    chunk_count = 0
+
+    async for raw_line in resp.content:
+        line = raw_line.decode("utf-8").strip()
+        if not line:
+            continue
+        if provider == "openai":
+            if not line.startswith("data:"):
+                continue
+            line = line[5:].strip()
+            if line == "[DONE]":
+                continue
+        try:
+            event_payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event_payload, dict):
+            continue
+        last_payload = event_payload
+        chunk_count += 1
+        log_json_content(debug_content, "response_json", event_payload)
+        response_part = extract_stream_response_chunk(event_payload, provider)
+        if response_part:
+            response_parts.append(response_part)
+
+    return "".join(response_parts), last_payload, chunk_count
+
+
+async def collect_response(
+    resp: Any, provider: str, stream: bool, debug_content: bool
+) -> tuple[str, dict[str, Any] | None, str | None, int | None]:
+    if stream:
+        response_text, response_payload, chunk_count = await collect_stream_response(
+            resp, provider, debug_content
+        )
+        return response_text, response_payload, None, chunk_count
+
+    text = await resp.text()
+    try:
+        response_payload = json.loads(text)
+    except json.JSONDecodeError:
+        log_json_content(debug_content, "response_json", text)
+        return text, None, text, None
+
+    if isinstance(response_payload, dict):
+        log_json_content(debug_content, "response_json", response_payload)
+        return extract_response(response_payload, provider), response_payload, text, None
+
+    log_json_content(debug_content, "response_json", response_payload)
+    return text, None, text, None
+
+
 async def list_models(
     *, provider: str, base_url: str, api_key: str | None, timeout_s: float
 ) -> list[str]:
@@ -360,35 +418,12 @@ async def test_request(
                 return 1
 
             print(f"status: {resp.status}")
-            if stream:
-                response_parts: list[str] = []
-                async for raw_line in resp.content:
-                    line = raw_line.decode("utf-8").strip()
-                    if not line:
-                        continue
-                    if provider == "openai":
-                        if not line.startswith("data:"):
-                            continue
-                        line = line[5:].strip()
-                        if line == "[DONE]":
-                            continue
-                    try:
-                        response_payload = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    log_json_content(debug_content, "response_json", response_payload)
-                    response_part = extract_stream_response_chunk(response_payload, provider)
-                    if response_part:
-                        response_parts.append(response_part)
-                print(f"response: {''.join(response_parts)}")
-            else:
-                text = await resp.text()
-                try:
-                    response_payload = json.loads(text)
-                    print(f"response: {extract_response(response_payload, provider)}")
-                except json.JSONDecodeError:
-                    response_payload = text
-                log_json_content(debug_content, "response_json", response_payload)
+            response_text, _, _, stream_chunks = await collect_response(
+                resp, provider, stream, debug_content
+            )
+            if stream_chunks is not None:
+                LOGGER.info("stream chunks received=%s", stream_chunks)
+            print(f"response: {response_text}")
     return 0
 
 
@@ -403,6 +438,7 @@ async def one_request(
     round_id: int,
     thinking_level: str | None,
     debug_content: bool,
+    stream: bool,
 ) -> RequestResult:
     start = time.perf_counter()
     try:
@@ -410,9 +446,9 @@ async def one_request(
         log_json_content(debug_content, "request_json", payload)
         async with session.post(url, headers=headers, json=payload) as resp:
             status = resp.status
-            text = await resp.text()
-            latency_s = time.perf_counter() - start
             if status >= 400:
+                text = await resp.text()
+                latency_s = time.perf_counter() - start
                 return RequestResult(
                     ok=False,
                     provider=provider,
@@ -422,12 +458,16 @@ async def one_request(
                     latency_s=latency_s,
                     output_tokens=None,
                     tokens_per_s=None,
+                    stream_chunks=None,
                     status=status,
                     error=text[:500],
                 )
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
+
+            response_text, response_payload, raw_text, stream_chunks = await collect_response(
+                resp, provider, stream, debug_content
+            )
+            latency_s = time.perf_counter() - start
+            if response_payload is None:
                 return RequestResult(
                     ok=False,
                     provider=provider,
@@ -437,15 +477,19 @@ async def one_request(
                     latency_s=latency_s,
                     output_tokens=None,
                     tokens_per_s=None,
+                    stream_chunks=stream_chunks,
                     status=status,
-                    error="Invalid JSON response",
+                    error="Invalid JSON response" if raw_text is not None else None,
                 )
 
-            log_json_content(debug_content, "response_json", data)
-            output_tokens = extract_output_tokens(provider, data)
+            output_tokens = extract_output_tokens(provider, response_payload)
+            if output_tokens is None and response_text:
+                output_tokens = None
             tokens_per_s = (
                 (output_tokens / latency_s) if output_tokens is not None and latency_s > 0 else None
             )
+            if stream_chunks is not None:
+                LOGGER.info("stream chunks received=%s", stream_chunks)
             return RequestResult(
                 ok=True,
                 provider=provider,
@@ -455,6 +499,7 @@ async def one_request(
                 latency_s=latency_s,
                 output_tokens=output_tokens,
                 tokens_per_s=tokens_per_s,
+                stream_chunks=stream_chunks,
                 status=status,
                 error=None,
             )
@@ -469,6 +514,7 @@ async def one_request(
             latency_s=latency_s,
             output_tokens=None,
             tokens_per_s=None,
+            stream_chunks=None,
             status=None,
             error=str(exc),
         )
@@ -492,6 +538,7 @@ async def run_point(
     extra_body_json: str | None,
     verbose: bool,
     debug_content: bool,
+    stream: bool,
 ) -> tuple[PointSummary, list[RequestResult]]:
     if aiohttp is None:
         raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
@@ -510,6 +557,7 @@ async def run_point(
         thinking_key=thinking_key,
         ctx_size=ctx_size,
         extra_body_json=extra_body_json,
+        stream=stream,
     )
 
     results: list[RequestResult] = []
@@ -526,6 +574,7 @@ async def run_point(
                     round_id=round_id,
                     thinking_level=thinking_level,
                     debug_content=debug_content,
+                    stream=stream,
                 )
                 for _ in range(concurrency)
             ]
@@ -535,12 +584,13 @@ async def run_point(
                 for item in batch:
                     if not item.ok:
                         LOGGER.warning(
-                            "provider=%s conc=%s round=%s thinking=%r status=%s error=%s",
+                            "provider=%s conc=%s round=%s thinking=%r status=%s chunks=%s error=%s",
                             provider,
                             concurrency,
                             round_id,
                             thinking_level,
                             item.status,
+                            item.stream_chunks,
                             item.error,
                         )
 
@@ -652,6 +702,7 @@ async def run_warmup(
     warmup_runs: int,
     verbose: bool,
     debug_content: bool,
+    stream: bool,
 ) -> None:
     if warmup_runs <= 0:
         return
@@ -671,6 +722,7 @@ async def run_warmup(
         thinking_key=thinking_key,
         ctx_size=ctx_size,
         extra_body_json=extra_body_json,
+        stream=stream,
     )
 
     LOGGER.info(
@@ -693,14 +745,16 @@ async def run_warmup(
                 round_id=-(warmup_id + 1),
                 thinking_level=thinking_level,
                 debug_content=debug_content,
+                stream=stream,
             )
             if verbose or not result.ok:
                 LOGGER.warning(
-                    "warmup-result run=%s/%s ok=%s status=%s latency_s=%.4f error=%s",
+                    "warmup-result run=%s/%s ok=%s status=%s chunks=%s latency_s=%.4f error=%s",
                     warmup_id + 1,
                     warmup_runs,
                     result.ok,
                     result.status,
+                    result.stream_chunks,
                     result.latency_s,
                     result.error,
                 )
@@ -790,9 +844,6 @@ async def async_main(args: argparse.Namespace) -> int:
             stream=args.stream,
         )
 
-    if args.stream:
-        LOGGER.warning("Ignoring --stream outside --test-request")
-
     concurrencies = parse_csv_ints(args.concurrency)
 
     await run_warmup(
@@ -811,6 +862,7 @@ async def async_main(args: argparse.Namespace) -> int:
         warmup_runs=args.warmup_runs,
         verbose=args.verbose,
         debug_content=args.debug_content,
+        stream=args.stream,
     )
 
     summaries: list[PointSummary] = []
@@ -819,12 +871,13 @@ async def async_main(args: argparse.Namespace) -> int:
     for thinking_level in thinking_levels:
         for concurrency in concurrencies:
             LOGGER.info(
-                "run provider=%s model=%s thinking=%r concurrency=%s rounds=%s",
+                "run provider=%s model=%s thinking=%r concurrency=%s rounds=%s stream=%s",
                 args.provider,
                 args.model,
                 thinking_level,
                 concurrency,
                 args.rounds,
+                args.stream,
             )
             summary, results = await run_point(
                 provider=args.provider,
@@ -843,6 +896,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 extra_body_json=args.extra_body_json,
                 verbose=args.verbose,
                 debug_content=args.debug_content,
+                stream=args.stream,
             )
             summaries.append(summary)
             all_results.extend(results)
@@ -862,6 +916,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 "max_tokens": effective_max_tokens,
                 "temperature": effective_temperature,
                 "ctx_size": args.ctx_size,
+                "stream": args.stream,
                 "timeout": args.timeout,
             },
             "summaries": [asdict(s) for s in summaries],

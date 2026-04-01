@@ -51,6 +51,17 @@ python bench.py \
   --warmup-runs 1
 ```
 
+Enable streaming in benchmark or test mode:
+
+```bash
+python bench.py \
+  --provider openai \
+  --base-url http://localhost:8000 \
+  --model my-model \
+  --concurrency 1,2,4 \
+  --stream
+```
+
 Omit a setting from requests when needed:
 
 ```bash
@@ -127,7 +138,7 @@ Notes:
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.
 - Use `--no-max-tokens` or `--no-temperature` to omit them from requests.
 - `--test-request` sends one payload and prints the response without running a benchmark.
-- `--stream` is currently supported for `--test-request` only.
+- `--stream` enables streaming mode for both benchmark and test requests.
 - `--ctx-size` is applied when supported by the target API.
 - For Ollama, it is sent as `options.num_ctx`.
 - If a setting is ignored by a provider, the tool prints a warning on stderr.
