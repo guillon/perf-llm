@@ -28,11 +28,7 @@ Install the project:
 pip install .
 ```
 
-Install with development tools:
-
-```bash
-pip install '.[dev]'
-```
+See the [Development](#development) section for development mode.
 
 ## Quick start
 
@@ -216,10 +212,10 @@ Notes:
 
 ## Development
 
-Install dev dependencies:
+Install dev dependencies in editable mode, for instance:
 
 ```bash
-pip install '.[dev]'
+pip install -e '.[dev]'
 ```
 
 Or with the Makefile:

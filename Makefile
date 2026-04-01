@@ -21,7 +21,7 @@ install:
 	$(PIP) install .
 
 install-dev:
-	$(PIP) install '.[dev]'
+	$(PIP) install -e '.[dev]'
 
 install-viz:
 	$(PIP) install '.[viz]'
