@@ -26,6 +26,8 @@ class RequestResult:
     round_id: int
     thinking_level: str | None
     latency_s: float
+    first_response_latency_s: float | None
+    first_content_latency_s: float | None
     output_tokens: int | None
     tokens_per_s: float | None
     stream_chunks: int | None
@@ -43,14 +45,23 @@ class PointSummary:
     total_requests: int
     succeeded: int
     failed: int
+    failure_rate_pct: float
+    wall_time_s: float
     latency_min_s: float | None
     latency_mean_s: float | None
     latency_p50_s: float | None
-    latency_p95_s: float | None
-    latency_p99_s: float | None
     latency_max_s: float | None
+    first_response_latency_min_s: float | None
+    first_response_latency_mean_s: float | None
+    first_response_latency_p50_s: float | None
+    first_response_latency_max_s: float | None
+    first_content_latency_min_s: float | None
+    first_content_latency_mean_s: float | None
+    first_content_latency_p50_s: float | None
+    first_content_latency_max_s: float | None
     throughput_mean_tokens_s: float | None
     throughput_sum_tokens_s: float | None
+    throughput_wall_tokens_s: float | None
     total_output_tokens: int
 
 
@@ -62,6 +73,37 @@ def parse_csv_strings(value: str | None) -> list[str | None]:
     if value is None or not value.strip():
         return [None]
     return [x.strip() for x in value.split(",") if x.strip()]
+
+
+def validate_positive_int(name: str, value: int, *, allow_zero: bool = False) -> None:
+    if allow_zero:
+        if value < 0:
+            raise SystemExit(f"{name} must be >= 0")
+    elif value <= 0:
+        raise SystemExit(f"{name} must be > 0")
+
+
+def validate_positive_float(name: str, value: float) -> None:
+    if value <= 0:
+        raise SystemExit(f"{name} must be > 0")
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    validate_positive_int("--rounds", args.rounds)
+    validate_positive_int("--warmup-runs", args.warmup_runs, allow_zero=True)
+    validate_positive_float("--timeout", args.timeout)
+    if args.max_tokens is not None:
+        validate_positive_int("--max-tokens", args.max_tokens)
+    if args.ctx_size is not None:
+        validate_positive_int("--ctx-size", args.ctx_size)
+    try:
+        concurrencies = parse_csv_ints(args.concurrency)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --concurrency value: {args.concurrency}") from exc
+    if not concurrencies:
+        raise SystemExit("--concurrency must contain at least one integer")
+    for concurrency in concurrencies:
+        validate_positive_int("--concurrency", concurrency)
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -236,6 +278,20 @@ def extract_model_names(provider: str, payload: dict[str, Any]) -> list[str]:
     return []
 
 
+def extract_text_parts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        text_parts: list[str] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                text_parts.append(item["text"])
+        return text_parts
+    return []
+
+
 def extract_stream_response_chunk(event_payload: dict[str, Any], provider: str) -> str:
     if provider == "openai":
         choices = event_payload.get("choices")
@@ -247,21 +303,25 @@ def extract_stream_response_chunk(event_payload: dict[str, Any], provider: str) 
         delta = choice.get("delta")
         if not isinstance(delta, dict):
             return ""
-        content = delta.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") == "text" and isinstance(item.get("text"), str):
-                    text_parts.append(item["text"])
-            return "".join(text_parts)
-        return ""
+        return "".join(extract_text_parts(delta.get("content")))
     if provider == "ollama":
         response = event_payload.get("response")
         return response if isinstance(response, str) else ""
+    return ""
+
+
+def extract_stream_reasoning_chunk(event_payload: dict[str, Any], provider: str) -> str:
+    if provider == "openai":
+        choices = event_payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return ""
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            return ""
+        return "".join(extract_text_parts(delta.get("reasoning_content")))
     return ""
 
 
@@ -277,17 +337,7 @@ def extract_response(response_payload: dict[str, Any], provider: str) -> str:
         if not isinstance(message, dict):
             return ""
         content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") == "text" and isinstance(item.get("text"), str):
-                    text_parts.append(item["text"])
-            return "".join(text_parts)
-        return ""
+        return "".join(extract_text_parts(content))
     if provider == "ollama":
         response = response_payload.get("response")
         return response if isinstance(response, str) else ""
@@ -295,11 +345,13 @@ def extract_response(response_payload: dict[str, Any], provider: str) -> str:
 
 
 async def collect_stream_response(
-    resp: Any, provider: str, debug_content: bool
-) -> tuple[str, dict[str, Any] | None, int]:
+    resp: Any, provider: str, debug_content: bool, start_time: float
+) -> tuple[str, dict[str, Any] | None, int, float | None, float | None]:
     response_parts: list[str] = []
     last_payload: dict[str, Any] | None = None
     chunk_count = 0
+    first_response_latency_s: float | None = None
+    first_content_latency_s: float | None = None
 
     async for raw_line in resp.content:
         line = raw_line.decode("utf-8").strip()
@@ -319,36 +371,66 @@ async def collect_stream_response(
             continue
         last_payload = event_payload
         chunk_count += 1
+        now = time.perf_counter()
+        if first_response_latency_s is None:
+            first_response_latency_s = now - start_time
         log_json_content(debug_content, "response_json", event_payload)
         response_part = extract_stream_response_chunk(event_payload, provider)
+        reasoning_part = extract_stream_reasoning_chunk(event_payload, provider)
+        if first_content_latency_s is None and (response_part or reasoning_part):
+            first_content_latency_s = now - start_time
         if response_part:
             response_parts.append(response_part)
 
-    return "".join(response_parts), last_payload, chunk_count
+    return (
+        "".join(response_parts),
+        last_payload,
+        chunk_count,
+        first_response_latency_s,
+        first_content_latency_s,
+    )
 
 
 async def collect_response(
-    resp: Any, provider: str, stream: bool, debug_content: bool
-) -> tuple[str, dict[str, Any] | None, str | None, int | None]:
+    resp: Any, provider: str, stream: bool, debug_content: bool, start_time: float
+) -> tuple[str, dict[str, Any] | None, str | None, int | None, float | None, float | None]:
     if stream:
-        response_text, response_payload, chunk_count = await collect_stream_response(
-            resp, provider, debug_content
+        (
+            response_text,
+            response_payload,
+            chunk_count,
+            first_response_latency_s,
+            first_content_latency_s,
+        ) = await collect_stream_response(resp, provider, debug_content, start_time)
+        return (
+            response_text,
+            response_payload,
+            None,
+            chunk_count,
+            first_response_latency_s,
+            first_content_latency_s,
         )
-        return response_text, response_payload, None, chunk_count
 
     text = await resp.text()
     try:
         response_payload = json.loads(text)
     except json.JSONDecodeError:
         log_json_content(debug_content, "response_json", text)
-        return text, None, text, None
+        return text, None, text, None, None, None
 
     if isinstance(response_payload, dict):
         log_json_content(debug_content, "response_json", response_payload)
-        return extract_response(response_payload, provider), response_payload, text, None
+        return (
+            extract_response(response_payload, provider),
+            response_payload,
+            text,
+            None,
+            None,
+            None,
+        )
 
     log_json_content(debug_content, "response_json", response_payload)
-    return text, None, text, None
+    return text, None, text, None, None, None
 
 
 async def list_models(
@@ -410,6 +492,7 @@ async def test_request(
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         LOGGER.debug("POST %s", url)
+        start = time.perf_counter()
         async with session.post(url, headers=headers, json=payload) as resp:
             if resp.status >= 400:
                 text = await resp.text()
@@ -418,11 +501,21 @@ async def test_request(
                 return 1
 
             print(f"status: {resp.status}")
-            response_text, _, _, stream_chunks = await collect_response(
-                resp, provider, stream, debug_content
-            )
+            (
+                response_text,
+                _,
+                _,
+                stream_chunks,
+                first_response_latency_s,
+                first_content_latency_s,
+            ) = await collect_response(resp, provider, stream, debug_content, start)
             if stream_chunks is not None:
-                LOGGER.info("stream chunks received=%s", stream_chunks)
+                LOGGER.info(
+                    "stream chunks received=%s first_response_latency_s=%.4f first_content_latency_s=%.4f",
+                    stream_chunks,
+                    first_response_latency_s if first_response_latency_s is not None else -1.0,
+                    first_content_latency_s if first_content_latency_s is not None else -1.0,
+                )
             print(f"response: {response_text}")
     return 0
 
@@ -456,6 +549,8 @@ async def one_request(
                     round_id=round_id,
                     thinking_level=thinking_level,
                     latency_s=latency_s,
+                    first_response_latency_s=None,
+                    first_content_latency_s=None,
                     output_tokens=None,
                     tokens_per_s=None,
                     stream_chunks=None,
@@ -463,9 +558,14 @@ async def one_request(
                     error=text[:500],
                 )
 
-            response_text, response_payload, raw_text, stream_chunks = await collect_response(
-                resp, provider, stream, debug_content
-            )
+            (
+                response_text,
+                response_payload,
+                raw_text,
+                stream_chunks,
+                first_response_latency_s,
+                first_content_latency_s,
+            ) = await collect_response(resp, provider, stream, debug_content, start)
             latency_s = time.perf_counter() - start
             if response_payload is None:
                 return RequestResult(
@@ -475,6 +575,8 @@ async def one_request(
                     round_id=round_id,
                     thinking_level=thinking_level,
                     latency_s=latency_s,
+                    first_response_latency_s=first_response_latency_s,
+                    first_content_latency_s=first_content_latency_s,
                     output_tokens=None,
                     tokens_per_s=None,
                     stream_chunks=stream_chunks,
@@ -489,7 +591,12 @@ async def one_request(
                 (output_tokens / latency_s) if output_tokens is not None and latency_s > 0 else None
             )
             if stream_chunks is not None:
-                LOGGER.info("stream chunks received=%s", stream_chunks)
+                LOGGER.info(
+                    "stream chunks received=%s first_response_latency_s=%.4f first_content_latency_s=%.4f",
+                    stream_chunks,
+                    first_response_latency_s if first_response_latency_s is not None else -1.0,
+                    first_content_latency_s if first_content_latency_s is not None else -1.0,
+                )
             return RequestResult(
                 ok=True,
                 provider=provider,
@@ -497,6 +604,8 @@ async def one_request(
                 round_id=round_id,
                 thinking_level=thinking_level,
                 latency_s=latency_s,
+                first_response_latency_s=first_response_latency_s,
+                first_content_latency_s=first_content_latency_s,
                 output_tokens=output_tokens,
                 tokens_per_s=tokens_per_s,
                 stream_chunks=stream_chunks,
@@ -512,6 +621,8 @@ async def one_request(
             round_id=round_id,
             thinking_level=thinking_level,
             latency_s=latency_s,
+            first_response_latency_s=None,
+            first_content_latency_s=None,
             output_tokens=None,
             tokens_per_s=None,
             stream_chunks=None,
@@ -558,6 +669,7 @@ async def run_point(
     )
 
     results: list[RequestResult] = []
+    point_start = time.perf_counter()
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for round_id in range(rounds):
             tasks = [
@@ -591,7 +703,10 @@ async def run_point(
                             item.error,
                         )
 
-    summary = summarize_point(provider, model, concurrency, rounds, thinking_level, results)
+    wall_time_s = time.perf_counter() - point_start
+    summary = summarize_point(
+        provider, model, concurrency, rounds, thinking_level, results, wall_time_s
+    )
     return summary, results
 
 
@@ -602,12 +717,20 @@ def summarize_point(
     rounds: int,
     thinking_level: str | None,
     results: list[RequestResult],
+    wall_time_s: float,
 ) -> PointSummary:
     latencies = [r.latency_s for r in results]
+    first_response_latencies = [
+        r.first_response_latency_s for r in results if r.first_response_latency_s is not None
+    ]
+    first_content_latencies = [
+        r.first_content_latency_s for r in results if r.first_content_latency_s is not None
+    ]
     tps_values = [r.tokens_per_s for r in results if r.tokens_per_s is not None]
     output_tokens = [r.output_tokens for r in results if r.output_tokens is not None]
     succeeded = sum(1 for r in results if r.ok)
     failed = len(results) - succeeded
+    failure_rate_pct = (failed / len(results) * 100.0) if results else 0.0
 
     return PointSummary(
         provider=provider,
@@ -618,14 +741,37 @@ def summarize_point(
         total_requests=len(results),
         succeeded=succeeded,
         failed=failed,
+        failure_rate_pct=failure_rate_pct,
+        wall_time_s=wall_time_s,
         latency_min_s=min(latencies) if latencies else None,
         latency_mean_s=statistics.fmean(latencies) if latencies else None,
         latency_p50_s=percentile(latencies, 0.50),
-        latency_p95_s=percentile(latencies, 0.95),
-        latency_p99_s=percentile(latencies, 0.99),
         latency_max_s=max(latencies) if latencies else None,
+        first_response_latency_min_s=min(first_response_latencies)
+        if first_response_latencies
+        else None,
+        first_response_latency_mean_s=(
+            statistics.fmean(first_response_latencies) if first_response_latencies else None
+        ),
+        first_response_latency_p50_s=percentile(first_response_latencies, 0.50),
+        first_response_latency_max_s=max(first_response_latencies)
+        if first_response_latencies
+        else None,
+        first_content_latency_min_s=min(first_content_latencies)
+        if first_content_latencies
+        else None,
+        first_content_latency_mean_s=(
+            statistics.fmean(first_content_latencies) if first_content_latencies else None
+        ),
+        first_content_latency_p50_s=percentile(first_content_latencies, 0.50),
+        first_content_latency_max_s=max(first_content_latencies)
+        if first_content_latencies
+        else None,
         throughput_mean_tokens_s=statistics.fmean(tps_values) if tps_values else None,
         throughput_sum_tokens_s=sum(tps_values) if tps_values else None,
+        throughput_wall_tokens_s=(sum(output_tokens) / wall_time_s)
+        if output_tokens and wall_time_s > 0
+        else None,
         total_output_tokens=sum(output_tokens) if output_tokens else 0,
     )
 
@@ -637,12 +783,21 @@ def print_summary_table(summaries: list[PointSummary]) -> None:
         "thinking",
         "conc",
         "ok",
-        "fail",
+        "fail%",
+        "lat_min",
         "lat_mean",
-        "p50",
-        "p95",
-        "p99",
+        "lat_p50",
+        "lat_max",
+        "ttfb_min",
+        "ttfb_mean",
+        "ttfb_p50",
+        "ttfb_max",
+        "ttfc_min",
+        "ttfc_mean",
+        "ttfc_p50",
+        "ttfc_max",
         "tps_mean",
+        "tps_wall",
         "tokens",
     ]
     rows = []
@@ -654,12 +809,21 @@ def print_summary_table(summaries: list[PointSummary]) -> None:
                 s.thinking_level or "-",
                 str(s.concurrency),
                 str(s.succeeded),
-                str(s.failed),
+                f"{s.failure_rate_pct:.1f}",
+                fmt_float(s.latency_min_s),
                 fmt_float(s.latency_mean_s),
                 fmt_float(s.latency_p50_s),
-                fmt_float(s.latency_p95_s),
-                fmt_float(s.latency_p99_s),
+                fmt_float(s.latency_max_s),
+                fmt_float(s.first_response_latency_min_s),
+                fmt_float(s.first_response_latency_mean_s),
+                fmt_float(s.first_response_latency_p50_s),
+                fmt_float(s.first_response_latency_max_s),
+                fmt_float(s.first_content_latency_min_s),
+                fmt_float(s.first_content_latency_mean_s),
+                fmt_float(s.first_content_latency_p50_s),
+                fmt_float(s.first_content_latency_max_s),
                 fmt_float(s.throughput_mean_tokens_s),
+                fmt_float(s.throughput_wall_tokens_s),
                 str(s.total_output_tokens),
             ]
         )
@@ -796,12 +960,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--debug-content", action="store_true")
     parser.add_argument("--log-file")
-    parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--stream", action="store_true", default=True)
+    parser.add_argument("--no-stream", action="store_false", dest="stream")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    validate_args(args)
     configure_logging(args.debug, args.quiet, args.log_file)
 
     if args.list_models:
