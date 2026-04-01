@@ -7,9 +7,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import math
 import statistics
-import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -85,6 +85,7 @@ def percentile(values: list[float], p: float) -> float | None:
 
 
 DEFAULT_PROMPT = "Hello, tell me a joke."
+LOGGER = logging.getLogger("perf_llm")
 
 
 def load_prompt(args: argparse.Namespace) -> str:
@@ -106,13 +107,13 @@ def merge_extra_body(base: dict[str, Any], extra_json: str | None) -> dict[str, 
     return merged
 
 
-def debug_log(enabled: bool, message: str) -> None:
-    if enabled:
-        print(f"[debug] {message}", file=sys.stderr)
-
-
-def warn_log(message: str) -> None:
-    print(f"[warn] {message}", file=sys.stderr)
+def configure_logging(debug: bool, quiet: bool) -> None:
+    level = logging.INFO
+    if debug:
+        level = logging.DEBUG
+    if quiet:
+        level = logging.WARNING
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
 def make_headers(provider: str, api_key: str | None) -> dict[str, str]:
@@ -146,7 +147,9 @@ def make_request_payload(
 ) -> dict[str, Any]:
     if provider == "openai":
         if ctx_size is not None:
-            warn_log("Ignoring --ctx-size for provider=openai: no standard chat/completions field")
+            LOGGER.warning(
+                "Ignoring --ctx-size for provider=openai: no standard chat/completions field"
+            )
         body: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
@@ -216,7 +219,7 @@ def extract_model_names(provider: str, payload: dict[str, Any]) -> list[str]:
 
 
 async def list_models(
-    *, provider: str, base_url: str, api_key: str | None, timeout_s: float, debug: bool
+    *, provider: str, base_url: str, api_key: str | None, timeout_s: float
 ) -> list[str]:
     if aiohttp is None:
         raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
@@ -226,7 +229,7 @@ async def list_models(
     timeout = aiohttp.ClientTimeout(total=timeout_s)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        debug_log(debug, f"GET {url}")
+        LOGGER.debug("GET %s", url)
         async with session.get(url, headers=headers) as resp:
             text = await resp.text()
             if resp.status >= 400:
@@ -249,11 +252,10 @@ async def one_request(
     concurrency: int,
     round_id: int,
     thinking_level: str | None,
-    debug: bool,
 ) -> RequestResult:
     start = time.perf_counter()
     try:
-        debug_log(debug, f"POST {url}")
+        LOGGER.debug("POST %s", url)
         async with session.post(url, headers=headers, json=payload) as resp:
             status = resp.status
             text = await resp.text()
@@ -336,7 +338,6 @@ async def run_point(
     timeout_s: float,
     extra_body_json: str | None,
     verbose: bool,
-    debug: bool,
 ) -> tuple[PointSummary, list[RequestResult]]:
     if aiohttp is None:
         raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
@@ -370,7 +371,6 @@ async def run_point(
                     concurrency=concurrency,
                     round_id=round_id,
                     thinking_level=thinking_level,
-                    debug=debug,
                 )
                 for _ in range(concurrency)
             ]
@@ -379,10 +379,14 @@ async def run_point(
             if verbose:
                 for item in batch:
                     if not item.ok:
-                        print(
-                            f"[warn] provider={provider} conc={concurrency} round={round_id} "
-                            f"thinking={thinking_level!r} status={item.status} error={item.error}",
-                            file=sys.stderr,
+                        LOGGER.warning(
+                            "provider=%s conc=%s round=%s thinking=%r status=%s error=%s",
+                            provider,
+                            concurrency,
+                            round_id,
+                            thinking_level,
+                            item.status,
+                            item.error,
                         )
 
     summary = summarize_point(provider, model, concurrency, rounds, thinking_level, results)
@@ -492,7 +496,6 @@ async def run_warmup(
     extra_body_json: str | None,
     warmup_runs: int,
     verbose: bool,
-    debug: bool,
 ) -> None:
     if warmup_runs <= 0:
         return
@@ -514,9 +517,12 @@ async def run_warmup(
         extra_body_json=extra_body_json,
     )
 
-    print(
-        f"[warmup] provider={provider} model={model} thinking={thinking_level!r} runs={warmup_runs}",
-        file=sys.stderr,
+    LOGGER.info(
+        "warmup provider=%s model=%s thinking=%r runs=%s",
+        provider,
+        model,
+        thinking_level,
+        warmup_runs,
     )
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -530,13 +536,16 @@ async def run_warmup(
                 concurrency=1,
                 round_id=-(warmup_id + 1),
                 thinking_level=thinking_level,
-                debug=debug,
             )
             if verbose or not result.ok:
-                print(
-                    f"[warmup-result] run={warmup_id + 1}/{warmup_runs} ok={result.ok} "
-                    f"status={result.status} latency_s={result.latency_s:.4f} error={result.error}",
-                    file=sys.stderr,
+                LOGGER.warning(
+                    "warmup-result run=%s/%s ok=%s status=%s latency_s=%.4f error=%s",
+                    warmup_id + 1,
+                    warmup_runs,
+                    result.ok,
+                    result.status,
+                    result.latency_s,
+                    result.error,
                 )
 
 
@@ -572,17 +581,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
     return parser
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    configure_logging(args.debug, args.quiet)
+
     if args.list_models:
         models = await list_models(
             provider=args.provider,
             base_url=args.base_url,
             api_key=args.api_key,
             timeout_s=args.timeout,
-            debug=args.debug,
         )
         for model_name in models:
             print(model_name)
@@ -613,7 +624,6 @@ async def async_main(args: argparse.Namespace) -> int:
         extra_body_json=args.extra_body_json,
         warmup_runs=args.warmup_runs,
         verbose=args.verbose,
-        debug=args.debug,
     )
 
     summaries: list[PointSummary] = []
@@ -621,10 +631,13 @@ async def async_main(args: argparse.Namespace) -> int:
 
     for thinking_level in thinking_levels:
         for concurrency in concurrencies:
-            print(
-                f"[run] provider={args.provider} model={args.model} "
-                f"thinking={thinking_level!r} concurrency={concurrency} rounds={args.rounds}",
-                file=sys.stderr,
+            LOGGER.info(
+                "run provider=%s model=%s thinking=%r concurrency=%s rounds=%s",
+                args.provider,
+                args.model,
+                thinking_level,
+                concurrency,
+                args.rounds,
             )
             summary, results = await run_point(
                 provider=args.provider,
@@ -642,7 +655,6 @@ async def async_main(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 extra_body_json=args.extra_body_json,
                 verbose=args.verbose,
-                debug=args.debug,
             )
             summaries.append(summary)
             all_results.extend(results)
@@ -668,7 +680,7 @@ async def async_main(args: argparse.Namespace) -> int:
             "requests": [asdict(r) for r in all_results],
         }
         Path(args.output_json).write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"\nWrote JSON results to {args.output_json}")
+        LOGGER.info("Wrote JSON results to %s", args.output_json)
 
     return 0
 

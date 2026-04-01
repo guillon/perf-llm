@@ -87,8 +87,16 @@ Enable debug logs:
 python bench.py --provider ollama --base-url http://localhost:11434 --list-models --debug
 ```
 
+Reduce log output to warnings only:
+
+```bash
+python bench.py --provider ollama --base-url http://localhost:11434 --model llama3 --quiet
+```
+
 Notes:
 
+- Logging uses the standard Python logging interface.
+- Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.
 - Use `--no-max-tokens` or `--no-temperature` to omit them from requests.
 - `--ctx-size` is applied when supported by the target API.
