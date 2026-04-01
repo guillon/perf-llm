@@ -3,7 +3,7 @@
 `perf-llm` benchmarks LLM servers exposed through:
 
 - OpenAI-compatible `v1/chat/completions`
-- Ollama HTTP API
+- Ollama HTTP API `/api/generate`
 
 It varies:
 
@@ -16,6 +16,7 @@ And reports:
 - streaming first-block latency (ttfb): min, mean, median, max
 - streaming first-content latency (ttfc): min, mean, median, max
 - throughput in tokens/sec, including wall-clock throughput
+- CSV summary output by default
 
 ## Install
 
@@ -60,6 +61,12 @@ perf-llm \
   --prompt-warmup ping
 ```
 
+By default, a CSV summary is written to:
+
+```text
+csv/bench-YYYYMMDD-HHMMSS.csv
+```
+
 Streaming is enabled by default in benchmark and test mode.
 Disable it when needed:
 
@@ -84,6 +91,8 @@ perf-llm \
 ```
 
 Benchmark an Ollama endpoint:
+
+Example against an Ollama server:
 
 ```bash
 perf-llm \
@@ -151,6 +160,8 @@ Notes:
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
 - `--log-file` writes logs to a file instead of stderr.
 - `--debug-content` logs request and response JSON content as one-line JSON at debug level.
+- `--csv-file` writes the summary CSV to an explicit path.
+- `--no-csv` disables the default summary CSV output.
 - `--prompt-warmup` sets the warmup prompt and defaults to `ping`.
 - Benchmark/test prompt defaults to `ping`.
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.

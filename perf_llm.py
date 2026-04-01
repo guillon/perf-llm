@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import json
 import logging
 import math
 import statistics
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -850,6 +852,23 @@ def fmt_float(value: float | None) -> str:
     return f"{value:.4f}"
 
 
+def default_csv_path(now: datetime) -> Path:
+    return Path("csv") / f"bench-{now.strftime('%Y%m%d-%H%M%S')}.csv"
+
+
+def write_csv_results(path: Path, timestamp: str, summaries: list[PointSummary]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["date", *asdict(summaries[0]).keys()] if summaries else ["date"]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for summary in summaries:
+            row = {"date": timestamp}
+            row.update(asdict(summary))
+            writer.writerow(row)
+    LOGGER.info("Wrote CSV results to %s", path)
+
+
 async def run_warmup(
     *,
     provider: str,
@@ -981,6 +1000,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--extra-body-json", default=None, help="Extra JSON object merged into the request body"
     )
     parser.add_argument("--output-json", help="Write detailed results to a JSON file")
+    parser.add_argument("--csv-file", help="Write summary CSV to this file")
+    parser.add_argument("--no-csv", action="store_true", help="Disable default CSV output")
     parser.add_argument("--verbose", action="store_true", help="Log per-request failures")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
@@ -998,6 +1019,8 @@ def build_parser() -> argparse.ArgumentParser:
 async def async_main(args: argparse.Namespace) -> int:
     validate_args(args)
     configure_logging(args.debug, args.quiet, args.log_file)
+    run_timestamp = datetime.now()
+    run_timestamp_iso = run_timestamp.isoformat(timespec="seconds")
 
     if args.list_models:
         models = await list_models(
@@ -1096,6 +1119,16 @@ async def async_main(args: argparse.Namespace) -> int:
             all_results.extend(results)
 
     print_summary_table(summaries)
+
+    csv_path = (
+        None
+        if args.no_csv
+        else Path(args.csv_file)
+        if args.csv_file
+        else default_csv_path(run_timestamp)
+    )
+    if csv_path is not None:
+        write_csv_results(csv_path, run_timestamp_iso, summaries)
 
     if args.output_json:
         payload = {
