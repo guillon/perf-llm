@@ -215,6 +215,8 @@ def make_request_payload(
             "messages": [{"role": "user", "content": prompt}],
             "stream": stream,
         }
+        if stream:
+            body["stream_options"] = {"include_usage": True}
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         if temperature is not None:
