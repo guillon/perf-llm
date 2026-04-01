@@ -39,7 +39,7 @@ typecheck:
 	pyright
 
 test:
-	$(PYTHON) -m py_compile bench.py
+	$(PYTHON) -m py_compile perf_llm.py
 	$(PYTHON) -m ruff check .
 	$(PYTHON) -m ruff format --check .
 	pyright

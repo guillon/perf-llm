@@ -50,7 +50,7 @@ ping
 Benchmark an OpenAI-compatible endpoint:
 
 ```bash
-python bench.py \
+perf-llm \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -64,7 +64,7 @@ Streaming is enabled by default in benchmark and test mode.
 Disable it when needed:
 
 ```bash
-python bench.py \
+perf-llm \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -75,7 +75,7 @@ python bench.py \
 Omit a setting from requests when needed:
 
 ```bash
-python bench.py \
+perf-llm \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -86,7 +86,7 @@ python bench.py \
 Benchmark an Ollama endpoint:
 
 ```bash
-python bench.py \
+perf-llm \
   --provider ollama \
   --base-url http://localhost:11434 \
   --model llama3 \
@@ -98,14 +98,14 @@ python bench.py \
 List models:
 
 ```bash
-python bench.py --provider openai --base-url http://localhost:8000 --list-models
-python bench.py --provider ollama --base-url http://localhost:11434 --list-models
+perf-llm --provider openai --base-url http://localhost:8000 --list-models
+perf-llm --provider ollama --base-url http://localhost:11434 --list-models
 ```
 
 Send one test request without benchmarking:
 
 ```bash
-python bench.py \
+perf-llm \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -115,7 +115,7 @@ python bench.py \
 Streaming is also enabled by default for test mode:
 
 ```bash
-python bench.py \
+perf-llm \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -130,19 +130,19 @@ This prints only:
 Enable debug logs:
 
 ```bash
-python bench.py --provider ollama --base-url http://localhost:11434 --list-models --debug
+perf-llm --provider ollama --base-url http://localhost:11434 --list-models --debug
 ```
 
 Write logs to a file instead of stderr:
 
 ```bash
-python bench.py --provider ollama --base-url http://localhost:11434 --model llama3 --log-file perf-llm.log
+perf-llm --provider ollama --base-url http://localhost:11434 --model llama3 --log-file perf-llm.log
 ```
 
 Reduce log output to warnings only:
 
 ```bash
-python bench.py --provider ollama --base-url http://localhost:11434 --model llama3 --quiet
+perf-llm --provider ollama --base-url http://localhost:11434 --model llama3 --quiet
 ```
 
 Notes:
@@ -205,7 +205,7 @@ make install-dev
 Run all required checks:
 
 ```bash
-PYTHON=.venv/bin/python PATH="$(pwd)/.venv/bin:$PATH" make test
+PYTHON=.venv/bin/python3 PATH="$(pwd)/.venv/bin:$PATH" make test
 ```
 
 This runs:

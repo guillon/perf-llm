@@ -9,7 +9,7 @@ This repository contains `perf-llm`, a small benchmark tool for LLM servers expo
 
 Main script:
 
-- `bench.py`
+- `perf_llm.py`
 
 ## Development rules
 
@@ -17,7 +17,7 @@ Main script:
 - Prefer minimal dependencies.
 - Maintain Python 3.10+ compatibility.
 - Update `README.md` when user-facing behavior changes.
-- Use the existing CLI style in `bench.py`.
+- Use the existing CLI style in `perf_llm.py`.
 - Preserve support for both providers: `openai` and `ollama`.
 - Keep debug output on stderr.
 - Do not leave code unformatted.
@@ -27,7 +27,7 @@ Main script:
 After every change, run:
 
 ```bash
-PYTHON=.venv/bin/python PATH="$(pwd)/.venv/bin:$PATH" make test
+PYTHON=.venv/bin/python3 PATH="$(pwd)/.venv/bin:$PATH" make test
 ```
 
 This must pass before considering the work complete.

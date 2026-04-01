@@ -928,9 +928,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Benchmark OpenAI-compatible and Ollama text completion servers",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--provider", choices=["openai", "ollama"], required=True)
-    parser.add_argument("--base-url", required=True)
-    parser.add_argument("--model")
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "ollama"],
+        required=True,
+        help="Target API provider",
+    )
+    parser.add_argument("--base-url", required=True, help="Server base URL")
+    parser.add_argument("--model", help="Model name to query")
     parser.add_argument(
         "--list-models",
         action="store_true",
@@ -941,30 +946,52 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Send one request payload and print the raw response, without benchmarking",
     )
-    parser.add_argument("--api-key")
-    parser.add_argument("--prompt")
-    parser.add_argument("--prompt-file")
-    parser.add_argument("--prompt-warmup", default=DEFAULT_WARMUP_PROMPT)
-    parser.add_argument("--concurrency", default="1")
-    parser.add_argument("--rounds", type=int, default=1)
-    parser.add_argument("--warmup-runs", type=int, default=1)
-    parser.add_argument("--thinking-level", default=None)
-    parser.add_argument("--thinking-key", default="thinking_level")
-    parser.add_argument("--max-tokens", type=int, default=1024)
-    parser.add_argument("--no-max-tokens", action="store_true")
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--no-temperature", action="store_true")
-    parser.add_argument("--ctx-size", type=int)
-    parser.add_argument("--timeout", type=float, default=300.0)
-    parser.add_argument("--extra-body-json", default=None)
-    parser.add_argument("--output-json")
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--debug-content", action="store_true")
-    parser.add_argument("--log-file")
-    parser.add_argument("--stream", action="store_true", default=True)
-    parser.add_argument("--no-stream", action="store_false", dest="stream")
-    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--api-key", help="Bearer token for OpenAI-compatible APIs")
+    parser.add_argument("--prompt", help="Prompt text for benchmark or test request")
+    parser.add_argument("--prompt-file", help="Read prompt text from file")
+    parser.add_argument(
+        "--prompt-warmup",
+        default=DEFAULT_WARMUP_PROMPT,
+        help="Prompt text used for warmup requests",
+    )
+    parser.add_argument(
+        "--concurrency",
+        default="1",
+        help="Comma-separated concurrency levels, e.g. 1,2,4",
+    )
+    parser.add_argument("--rounds", type=int, default=1, help="Rounds per benchmark point")
+    parser.add_argument("--warmup-runs", type=int, default=1, help="Number of warmup requests")
+    parser.add_argument("--thinking-level", default=None, help="Comma-separated thinking levels")
+    parser.add_argument(
+        "--thinking-key", default="thinking_level", help="Request field used for thinking level"
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=1024, help="Maximum output tokens to request"
+    )
+    parser.add_argument(
+        "--no-max-tokens", action="store_true", help="Omit max_tokens from the request"
+    )
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    parser.add_argument(
+        "--no-temperature", action="store_true", help="Omit temperature from the request"
+    )
+    parser.add_argument("--ctx-size", type=int, help="Requested context size when supported")
+    parser.add_argument("--timeout", type=float, default=300.0, help="Request timeout in seconds")
+    parser.add_argument(
+        "--extra-body-json", default=None, help="Extra JSON object merged into the request body"
+    )
+    parser.add_argument("--output-json", help="Write detailed results to a JSON file")
+    parser.add_argument("--verbose", action="store_true", help="Log per-request failures")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--debug-content", action="store_true", help="Log request and response JSON payloads"
+    )
+    parser.add_argument("--log-file", help="Write logs to this file instead of stderr")
+    parser.add_argument("--stream", action="store_true", default=True, help="Enable streaming mode")
+    parser.add_argument(
+        "--no-stream", action="store_false", dest="stream", help="Disable streaming mode"
+    )
+    parser.add_argument("--quiet", action="store_true", help="Only log warnings and errors")
     return parser
 
 
