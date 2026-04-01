@@ -13,15 +13,9 @@ import statistics
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    import aiohttp
-
-try:
-    import aiohttp
-except ImportError:  # pragma: no cover
-    aiohttp = None
+import aiohttp
 
 
 @dataclass
@@ -355,9 +349,6 @@ async def collect_response(
 async def list_models(
     *, provider: str, base_url: str, api_key: str | None, timeout_s: float
 ) -> list[str]:
-    if aiohttp is None:
-        raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
-
     headers = make_headers(provider, api_key)
     url = models_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -393,9 +384,6 @@ async def test_request(
     debug_content: bool,
     stream: bool,
 ) -> int:
-    if aiohttp is None:
-        raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
-
     headers = make_headers(provider, api_key)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -547,9 +535,6 @@ async def run_point(
     debug_content: bool,
     stream: bool,
 ) -> tuple[PointSummary, list[RequestResult]]:
-    if aiohttp is None:
-        raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
-
     headers = make_headers(provider, api_key)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -713,8 +698,6 @@ async def run_warmup(
 ) -> None:
     if warmup_runs <= 0:
         return
-    if aiohttp is None:
-        raise SystemExit("Missing dependency: aiohttp. Install it with: pip install aiohttp")
 
     headers = make_headers(provider, api_key)
     url = endpoint_url(provider, base_url)
@@ -777,7 +760,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model")
     parser.add_argument(
         "--list-models",
-        "--list-mnodels",
         action="store_true",
         help="List models available on the base URL and exit",
     )
