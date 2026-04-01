@@ -90,6 +90,17 @@ perf-llm \
   --no-max-tokens
 ```
 
+Use the MLX-compatible OpenAI variant when needed:
+
+```bash
+perf-llm \
+  --provider openai \
+  --api-variant mlx \
+  --base-url http://localhost:8000 \
+  --model my-model \
+  --thinking-level high
+```
+
 Benchmark an Ollama endpoint:
 
 Example against an Ollama server:
@@ -156,6 +167,11 @@ perf-llm --provider ollama --base-url http://localhost:11434 --model llama3 --qu
 
 Notes:
 
+- `--api-variant default` uses OpenAI-style `reasoning_effort` for `provider=openai` when a thinking level is set.
+- `--api-variant mlx` uses `chat_template_kwargs.enable_thinking` and `chat_template_kwargs.reasoning_effort` for `provider=openai`.
+- For `provider=ollama`, `--api-variant` must stay `default`.
+- If thinking level is omitted or set to `default`, it is not sent in the request.
+- If thinking level is set to `none`, mlx disables thinking explicitly and Ollama sends the value through `--thinking-key`.
 - Logging uses the standard Python logging interface.
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
 - `--log-file` writes logs to a file instead of stderr.
@@ -176,6 +192,7 @@ Notes:
 ## Output fields
 
 - `provider`: backend family used for the benchmark point, either `openai` or `ollama`.
+- `variant`: provider-specific API flavor used for the benchmark point, such as `default` or `mlx`.
 - `model`: model identifier sent in the request body for that benchmark point.
 - `thinking`: thinking level value sent with the request, or `-` when no thinking level is set.
 - `conc`: number of requests issued concurrently in each round for that benchmark point.

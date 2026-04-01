@@ -40,6 +40,7 @@ class RequestResult:
 @dataclass
 class PointSummary:
     provider: str
+    api_variant: str
     model: str
     concurrency: int
     rounds: int
@@ -77,6 +78,15 @@ def parse_csv_strings(value: str | None) -> list[str | None]:
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
+def normalize_thinking_level(thinking_level: str | None) -> str | None:
+    if thinking_level is None:
+        return None
+    lowered = thinking_level.strip().lower()
+    if not lowered or lowered == "default":
+        return None
+    return thinking_level
+
+
 def validate_positive_int(name: str, value: int, *, allow_zero: bool = False) -> None:
     if allow_zero:
         if value < 0:
@@ -98,6 +108,8 @@ def validate_args(args: argparse.Namespace) -> None:
         validate_positive_int("--max-tokens", args.max_tokens)
     if args.ctx_size is not None:
         validate_positive_int("--ctx-size", args.ctx_size)
+    if args.provider == "ollama" and args.api_variant != "default":
+        raise SystemExit("--api-variant is only supported for provider=openai")
     try:
         concurrencies = parse_csv_ints(args.concurrency)
     except ValueError as exc:
@@ -197,6 +209,7 @@ def extract_output_tokens(provider: str, payload: dict[str, Any]) -> int | None:
 
 def make_request_payload(
     provider: str,
+    api_variant: str,
     model: str,
     prompt: str,
     max_tokens: int | None,
@@ -207,6 +220,8 @@ def make_request_payload(
     extra_body_json: str | None,
     stream: bool = False,
 ) -> dict[str, Any]:
+    normalized_thinking_level = normalize_thinking_level(thinking_level)
+
     if provider == "openai":
         if ctx_size is not None:
             LOGGER.warning(
@@ -223,6 +238,21 @@ def make_request_payload(
             body["max_tokens"] = max_tokens
         if temperature is not None:
             body["temperature"] = temperature
+        if api_variant == "default":
+            if normalized_thinking_level == "none":
+                LOGGER.warning(
+                    "Ignoring thinking_level=none for provider=openai api_variant=default: no standard disable-thinking field"
+                )
+            elif normalized_thinking_level is not None:
+                body["reasoning_effort"] = normalized_thinking_level
+        elif api_variant == "mlx":
+            if normalized_thinking_level == "none":
+                body["chat_template_kwargs"] = {"enable_thinking": False}
+            elif normalized_thinking_level is not None:
+                body["chat_template_kwargs"] = {
+                    "enable_thinking": True,
+                    "reasoning_effort": normalized_thinking_level,
+                }
     elif provider == "ollama":
         options: dict[str, Any] = {}
         if temperature is not None:
@@ -240,8 +270,8 @@ def make_request_payload(
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
-    if thinking_level is not None:
-        body[thinking_key] = thinking_level
+    if provider == "ollama" and normalized_thinking_level is not None:
+        body[thinking_key] = normalized_thinking_level
 
     return merge_extra_body(body, extra_body_json)
 
@@ -461,6 +491,7 @@ async def list_models(
 async def test_request(
     *,
     provider: str,
+    api_variant: str,
     base_url: str,
     model: str,
     api_key: str | None,
@@ -480,6 +511,7 @@ async def test_request(
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     payload = make_request_payload(
         provider=provider,
+        api_variant=api_variant,
         model=model,
         prompt=prompt,
         max_tokens=max_tokens,
@@ -638,6 +670,7 @@ async def one_request(
 async def run_point(
     *,
     provider: str,
+    api_variant: str,
     base_url: str,
     model: str,
     api_key: str | None,
@@ -661,6 +694,7 @@ async def run_point(
 
     payload = make_request_payload(
         provider=provider,
+        api_variant=api_variant,
         model=model,
         prompt=prompt,
         max_tokens=max_tokens,
@@ -709,13 +743,21 @@ async def run_point(
 
     wall_time_s = time.perf_counter() - point_start
     summary = summarize_point(
-        provider, model, concurrency, rounds, thinking_level, results, wall_time_s
+        provider,
+        api_variant,
+        model,
+        concurrency,
+        rounds,
+        thinking_level,
+        results,
+        wall_time_s,
     )
     return summary, results
 
 
 def summarize_point(
     provider: str,
+    api_variant: str,
     model: str,
     concurrency: int,
     rounds: int,
@@ -738,6 +780,7 @@ def summarize_point(
 
     return PointSummary(
         provider=provider,
+        api_variant=api_variant,
         model=model,
         concurrency=concurrency,
         rounds=rounds,
@@ -783,6 +826,7 @@ def summarize_point(
 def print_summary_table(summaries: list[PointSummary]) -> None:
     headers = [
         "provider",
+        "variant",
         "model",
         "thinking",
         "conc",
@@ -809,6 +853,7 @@ def print_summary_table(summaries: list[PointSummary]) -> None:
         rows.append(
             [
                 s.provider,
+                s.api_variant,
                 s.model,
                 s.thinking_level or "-",
                 str(s.concurrency),
@@ -872,6 +917,7 @@ def write_csv_results(path: Path, timestamp: str, summaries: list[PointSummary])
 async def run_warmup(
     *,
     provider: str,
+    api_variant: str,
     base_url: str,
     model: str,
     api_key: str | None,
@@ -896,6 +942,7 @@ async def run_warmup(
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     payload = make_request_payload(
         provider=provider,
+        api_variant=api_variant,
         model=model,
         prompt=prompt,
         max_tokens=max_tokens,
@@ -908,11 +955,13 @@ async def run_warmup(
     )
 
     LOGGER.info(
-        "warmup provider=%s model=%s thinking=%r runs=%s",
+        "warmup provider=%s api_variant=%s model=%s thinking=%r runs=%s stream=%s",
         provider,
+        api_variant,
         model,
         thinking_level,
         warmup_runs,
+        stream,
     )
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -952,6 +1001,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["openai", "ollama"],
         required=True,
         help="Target API provider",
+    )
+    parser.add_argument(
+        "--api-variant",
+        choices=["default", "mlx"],
+        default="default",
+        help="Provider-specific API flavor",
     )
     parser.add_argument("--base-url", required=True, help="Server base URL")
     parser.add_argument("--model", help="Model name to query")
@@ -1046,6 +1101,7 @@ async def async_main(args: argparse.Namespace) -> int:
     if args.test_request:
         return await test_request(
             provider=args.provider,
+            api_variant=args.api_variant,
             base_url=args.base_url,
             model=args.model,
             api_key=args.api_key,
@@ -1065,6 +1121,7 @@ async def async_main(args: argparse.Namespace) -> int:
 
     await run_warmup(
         provider=args.provider,
+        api_variant=args.api_variant,
         base_url=args.base_url,
         model=args.model,
         api_key=args.api_key,
@@ -1088,8 +1145,9 @@ async def async_main(args: argparse.Namespace) -> int:
     for thinking_level in thinking_levels:
         for concurrency in concurrencies:
             LOGGER.info(
-                "run provider=%s model=%s thinking=%r concurrency=%s rounds=%s stream=%s",
+                "run provider=%s api_variant=%s model=%s thinking=%r concurrency=%s rounds=%s stream=%s",
                 args.provider,
+                args.api_variant,
                 args.model,
                 thinking_level,
                 concurrency,
@@ -1098,6 +1156,7 @@ async def async_main(args: argparse.Namespace) -> int:
             )
             summary, results = await run_point(
                 provider=args.provider,
+                api_variant=args.api_variant,
                 base_url=args.base_url,
                 model=args.model,
                 api_key=args.api_key,
@@ -1134,6 +1193,7 @@ async def async_main(args: argparse.Namespace) -> int:
         payload = {
             "config": {
                 "provider": args.provider,
+                "api_variant": args.api_variant,
                 "base_url": args.base_url,
                 "model": args.model,
                 "concurrency": concurrencies,
