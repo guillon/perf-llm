@@ -12,7 +12,7 @@ It varies:
 
 And reports:
 
-- latency statistics
+- latency statistics, including p50
 - throughput in tokens/sec
 
 ## Install
@@ -131,6 +131,12 @@ Enable debug logs:
 python bench.py --provider ollama --base-url http://localhost:11434 --list-models --debug
 ```
 
+Write logs to a file instead of stderr:
+
+```bash
+python bench.py --provider ollama --base-url http://localhost:11434 --model llama3 --log-file perf-llm.log
+```
+
 Reduce log output to warnings only:
 
 ```bash
@@ -141,7 +147,8 @@ Notes:
 
 - Logging uses the standard Python logging interface.
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
-- `--debug-content` logs request and response JSON content at debug level.
+- `--log-file` writes logs to a file instead of stderr.
+- `--debug-content` logs request and response JSON content as one-line JSON at debug level.
 - `--prompt-warmup` sets the warmup prompt and defaults to `ping`.
 - Benchmark/test prompt defaults to `ping`.
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.

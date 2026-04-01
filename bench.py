@@ -109,23 +109,28 @@ def merge_extra_body(base: dict[str, Any], extra_json: str | None) -> dict[str, 
     return merged
 
 
-def configure_logging(debug: bool, quiet: bool) -> None:
+def configure_logging(debug: bool, quiet: bool, log_file: str | None) -> None:
     level = logging.INFO
     if debug:
         level = logging.DEBUG
     if quiet:
         level = logging.WARNING
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)s: %(message)s",
+        filename=log_file,
+        filemode="a" if log_file else "w",
+    )
 
 
 def log_json_content(enabled: bool, label: str, payload: Any) -> None:
     if not enabled:
         return
     try:
-        rendered = json.dumps(payload, indent=2, sort_keys=True)
+        rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     except TypeError:
         rendered = repr(payload)
-    LOGGER.debug("%s:\n%s", label, rendered)
+    LOGGER.debug("%s: %s", label, rendered)
 
 
 def make_headers(provider: str, api_key: str | None) -> dict[str, str]:
@@ -634,6 +639,7 @@ def print_summary_table(summaries: list[PointSummary]) -> None:
         "ok",
         "fail",
         "lat_mean",
+        "p50",
         "p95",
         "p99",
         "tps_mean",
@@ -650,6 +656,7 @@ def print_summary_table(summaries: list[PointSummary]) -> None:
                 str(s.succeeded),
                 str(s.failed),
                 fmt_float(s.latency_mean_s),
+                fmt_float(s.latency_p50_s),
                 fmt_float(s.latency_p95_s),
                 fmt_float(s.latency_p99_s),
                 fmt_float(s.throughput_mean_tokens_s),
@@ -788,13 +795,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--debug-content", action="store_true")
+    parser.add_argument("--log-file")
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
 
 async def async_main(args: argparse.Namespace) -> int:
-    configure_logging(args.debug, args.quiet)
+    configure_logging(args.debug, args.quiet, args.log_file)
 
     if args.list_models:
         models = await list_models(
