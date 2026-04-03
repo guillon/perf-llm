@@ -3,6 +3,7 @@
 `perf-llm` benchmarks LLM servers exposed through:
 
 - OpenAI-compatible `v1/chat/completions`
+- OpenAI Codex Responses API `/codex/responses`
 - Ollama HTTP API `/api/generate`
 
 It varies:
@@ -14,8 +15,8 @@ And reports:
 
 - latency statistics: min, mean, median, max
 - streaming first-block latency (ttfb): min, mean, median, max
-- streaming first-content latency (ttfc): min, mean, median, max
-- throughput in tokens/sec, including wall-clock throughput
+- streaming first-token latency (ttft): min, mean, median, max
+- throughput in tokens/sec, average and wall-clock throughput
 - CSV summary output by default
 
 ## Install
@@ -35,7 +36,7 @@ See the [Development](#development) section for development mode.
 Default benchmark/test prompt:
 
 ```text
-ping
+Generate a 256 words text.
 ```
 
 Default warmup prompt:
@@ -95,6 +96,15 @@ perf-llm \
   --base-url http://localhost:8000 \
   --model my-model \
   --thinking-level high
+```
+
+Benchmark the OpenAI Codex Responses API with Pi authentication:
+
+```bash
+perf-llm \
+  --provider openai-codex \
+  --model gpt-5.4 \
+  --auth-with pi
 ```
 
 Benchmark an Ollama endpoint:
@@ -179,7 +189,11 @@ Notes:
 - If thinking level is omitted or set to `default`, it is not sent in the request.
 - If thinking level is set to `none`, mlx disables thinking explicitly and Ollama sends the value through `--thinking-key`.
 - OpenAI-compatible authentication supports either `--api-key` or `--oauth-access-token`.
+- Use `--auth-with pi` to load a token from `~/.pi/agent/auth.json`.
 - If both are provided, `--oauth-access-token` takes precedence.
+- `openai-codex` uses the Codex Responses API, requires streaming mode, and defaults `--base-url` to `https://chatgpt.com/backend-api`.
+- `openai-codex` does not support `--max-tokens`; use `--no-max-tokens` or leave it unset.
+- `openai-codex` does not support `--temperature`; use `--no-temperature` or leave it unset.
 - Logging uses the standard Python logging interface.
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
 - `--log-file` writes logs to a file instead of stderr.
@@ -214,10 +228,10 @@ Notes:
 - `ttfb_mean`: arithmetic mean streaming time-to-first-block across requests in the benchmark point.
 - `ttfb_p50`: median streaming time-to-first-block across requests in the benchmark point.
 - `ttfb_max`: maximum streaming time-to-first-block observed across requests in the benchmark point.
-- `ttfc_min`: minimum streaming time-to-first-content observed across requests in the benchmark point.
-- `ttfc_mean`: arithmetic mean streaming time-to-first-content across requests in the benchmark point.
-- `ttfc_p50`: median streaming time-to-first-content across requests in the benchmark point.
-- `ttfc_max`: maximum streaming time-to-first-content observed across requests in the benchmark point.
+- `ttft_min`: minimum streaming time-to-first-token observed across requests in the benchmark point.
+- `ttft_mean`: arithmetic mean streaming time-to-first-token across requests in the benchmark point.
+- `ttft_p50`: median streaming time-to-first-token across requests in the benchmark point.
+- `ttft_max`: maximum streaming time-to-first-token observed across requests in the benchmark point.
 - `tps_mean`: arithmetic mean per-request output throughput in tokens per second across requests with token counts.
 - `tps_wall`: aggregate output throughput computed as total output tokens divided by measured wall-clock time for the benchmark point.
 - `tokens`: total number of output tokens reported by the backend across all successful requests in the benchmark point.

@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import csv
 import json
 import logging
 import math
+import platform
+import re
 import statistics
 import time
 from dataclasses import asdict, dataclass
@@ -29,7 +32,7 @@ class RequestResult:
     thinking_level: str | None
     latency_s: float
     first_response_latency_s: float | None
-    first_content_latency_s: float | None
+    first_token_latency_s: float | None
     output_tokens: int | None
     tokens_per_s: float | None
     stream_chunks: int | None
@@ -58,10 +61,10 @@ class PointSummary:
     first_response_latency_mean_s: float | None
     first_response_latency_p50_s: float | None
     first_response_latency_max_s: float | None
-    first_content_latency_min_s: float | None
-    first_content_latency_mean_s: float | None
-    first_content_latency_p50_s: float | None
-    first_content_latency_max_s: float | None
+    first_token_latency_min_s: float | None
+    first_token_latency_mean_s: float | None
+    first_token_latency_p50_s: float | None
+    first_token_latency_max_s: float | None
     throughput_mean_tokens_s: float | None
     throughput_sum_tokens_s: float | None
     throughput_wall_tokens_s: float | None
@@ -106,12 +109,24 @@ def validate_args(args: argparse.Namespace) -> None:
     validate_positive_float("--timeout", args.timeout)
     if args.api_key and args.oauth_access_token:
         LOGGER.warning("Both --api-key and --oauth-access-token were provided; using OAuth token")
+    if args.provider == "openai-codex" and not args.no_max_tokens and args.max_tokens is not None:
+        raise SystemExit(
+            "provider=openai-codex does not support --max-tokens; use --no-max-tokens or omit it"
+        )
+    if args.provider == "openai-codex" and not args.no_temperature and args.temperature is not None:
+        raise SystemExit(
+            "provider=openai-codex does not support --temperature; use --no-temperature or omit it"
+        )
     if args.max_tokens is not None:
         validate_positive_int("--max-tokens", args.max_tokens)
     if args.ctx_size is not None:
         validate_positive_int("--ctx-size", args.ctx_size)
     if args.provider == "ollama" and args.api_variant != "default":
         raise SystemExit("--api-variant is only supported for provider=openai")
+    if args.provider == "openai-codex" and args.api_variant != "default":
+        raise SystemExit("--api-variant is only supported for provider=openai")
+    if args.provider == "openai-codex" and not args.stream:
+        raise SystemExit("provider=openai-codex requires streaming; --no-stream is unsupported")
     try:
         concurrencies = parse_csv_ints(args.concurrency)
     except ValueError as exc:
@@ -137,9 +152,12 @@ def percentile(values: list[float], p: float) -> float | None:
     return values[low] * (1 - frac) + values[high] * frac
 
 
-DEFAULT_PROMPT = "ping"
+DEFAULT_PROMPT = "Generate a 256 words text."
 DEFAULT_WARMUP_PROMPT = "ping"
 LOGGER = logging.getLogger("perf_llm")
+PI_AUTH_PATH = Path.home() / ".pi/agent/auth.json"
+PI_JWT_AUTH_CLAIM = "https://api.openai.com/auth"
+JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 
 
 def load_prompt(args: argparse.Namespace) -> str:
@@ -167,6 +185,71 @@ def merge_extra_body(base: dict[str, Any], extra_json: str | None) -> dict[str, 
     return merged
 
 
+def decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8")
+        data = json.loads(raw)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def iter_strings(value: Any, path: str = "$") -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    if isinstance(value, str):
+        found.append((path, value))
+    elif isinstance(value, dict):
+        for key, nested in value.items():
+            found.extend(iter_strings(nested, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            found.extend(iter_strings(nested, f"{path}[{index}]"))
+    return found
+
+
+def load_pi_auth() -> tuple[str, str | None]:
+    if not PI_AUTH_PATH.exists():
+        raise SystemExit(f"PI auth file not found: {PI_AUTH_PATH}")
+    data = json.loads(PI_AUTH_PATH.read_text(encoding="utf-8"))
+    candidates: list[tuple[str, str, str | None]] = []
+    for path, value in iter_strings(data):
+        if not JWT_RE.match(value):
+            continue
+        payload = decode_jwt_payload(value)
+        if payload is None:
+            continue
+        auth_claim = payload.get(PI_JWT_AUTH_CLAIM)
+        account_id = auth_claim.get("chatgpt_account_id") if isinstance(auth_claim, dict) else None
+        candidates.append((path, value, account_id))
+    if not candidates:
+        raise SystemExit(f"No JWT-like access token found in {PI_AUTH_PATH}")
+    selected_path, token, account_id = next(
+        ((path, token, account_id) for path, token, account_id in candidates if account_id),
+        candidates[0],
+    )
+    LOGGER.info("Loaded auth token from %s", selected_path)
+    return token, account_id
+
+
+def resolve_auth(
+    auth_with: str | None, api_key: str | None, oauth_access_token: str | None
+) -> tuple[str | None, str | None, str | None]:
+    resolved_api_key = api_key
+    resolved_oauth_access_token = oauth_access_token
+    account_id: str | None = None
+
+    if auth_with == "pi":
+        token, account_id = load_pi_auth()
+        resolved_api_key = None
+        resolved_oauth_access_token = token
+
+    return resolved_api_key, resolved_oauth_access_token, account_id
+
+
 def configure_logging(debug: bool, quiet: bool, log_file: str | None) -> None:
     level = logging.INFO
     if debug:
@@ -192,12 +275,35 @@ def log_json_content(enabled: bool, label: str, payload: Any) -> None:
 
 
 def make_headers(
-    provider: str, api_key: str | None, oauth_access_token: str | None
+    provider: str,
+    api_key: str | None,
+    oauth_access_token: str | None,
+    account_id: str | None,
+    stream: bool,
 ) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     bearer_token = oauth_access_token or api_key
-    if provider == "openai" and bearer_token:
+    if provider in {"openai", "openai-codex"} and bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
+    if provider == "openai-codex":
+        if not account_id:
+            payload = decode_jwt_payload(bearer_token or "")
+            auth_claim = payload.get(PI_JWT_AUTH_CLAIM) if isinstance(payload, dict) else None
+            account_id = (
+                auth_claim.get("chatgpt_account_id") if isinstance(auth_claim, dict) else None
+            )
+        if not account_id:
+            raise SystemExit(
+                "openai-codex requires chatgpt_account_id in the token or via --auth-with pi"
+            )
+        headers["chatgpt-account-id"] = account_id
+        headers["originator"] = "pi"
+        headers["User-Agent"] = (
+            f"pi ({platform.system().lower()} {platform.release()}; {platform.machine()})"
+        )
+        if stream:
+            headers["OpenAI-Beta"] = "responses=experimental"
+            headers["accept"] = "text/event-stream"
     return headers
 
 
@@ -205,6 +311,13 @@ def extract_output_tokens(provider: str, payload: dict[str, Any]) -> int | None:
     if provider == "openai":
         usage = payload.get("usage") or {}
         value = usage.get("completion_tokens")
+        return int(value) if isinstance(value, (int, float)) else None
+    if provider == "openai-codex":
+        usage_container = (
+            payload.get("response") if isinstance(payload.get("response"), dict) else payload
+        )
+        usage = usage_container.get("usage") if isinstance(usage_container, dict) else None
+        value = usage.get("output_tokens") if isinstance(usage, dict) else None
         return int(value) if isinstance(value, (int, float)) else None
     if provider == "ollama":
         value = payload.get("eval_count")
@@ -258,6 +371,31 @@ def make_request_payload(
                     "enable_thinking": True,
                     "reasoning_effort": normalized_thinking_level,
                 }
+    elif provider == "openai-codex":
+        if not stream:
+            raise SystemExit("provider=openai-codex requires streaming; --no-stream is unsupported")
+        if ctx_size is not None:
+            LOGGER.warning(
+                "Ignoring --ctx-size for provider=openai-codex: no standard Codex Responses field"
+            )
+        body = {
+            "model": model,
+            "store": False,
+            "stream": True,
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+            "text": {"verbosity": "medium"},
+            "include": ["reasoning.encrypted_content"],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
+        if normalized_thinking_level is not None:
+            body["reasoning"] = {"effort": normalized_thinking_level, "summary": "auto"}
     elif provider == "ollama":
         options: dict[str, Any] = {}
         if temperature is not None:
@@ -272,11 +410,10 @@ def make_request_payload(
             "stream": stream,
             "options": options,
         }
+        if normalized_thinking_level is not None:
+            body[thinking_key] = normalized_thinking_level
     else:
         raise ValueError(f"Unsupported provider: {provider}")
-
-    if provider == "ollama" and normalized_thinking_level is not None:
-        body[thinking_key] = normalized_thinking_level
 
     return merge_extra_body(body, extra_body_json)
 
@@ -285,6 +422,12 @@ def endpoint_url(provider: str, base_url: str) -> str:
     base_url = base_url.rstrip("/")
     if provider == "openai":
         return f"{base_url}/v1/chat/completions"
+    if provider == "openai-codex":
+        if base_url.endswith("/codex/responses"):
+            return base_url
+        if base_url.endswith("/codex"):
+            return f"{base_url}/responses"
+        return f"{base_url}/codex/responses"
     if provider == "ollama":
         return f"{base_url}/api/generate"
     raise ValueError(f"Unsupported provider: {provider}")
@@ -296,7 +439,7 @@ def models_url(provider: str, base_url: str) -> str:
         return f"{base_url}/v1/models"
     if provider == "ollama":
         return f"{base_url}/api/tags"
-    raise ValueError(f"Unsupported provider: {provider}")
+    raise ValueError(f"Model listing is not supported for provider: {provider}")
 
 
 def extract_model_names(provider: str, payload: dict[str, Any]) -> list[str]:
@@ -306,6 +449,9 @@ def extract_model_names(provider: str, payload: dict[str, Any]) -> list[str]:
             return []
         names = [item.get("id") for item in data if isinstance(item, dict)]
         return [str(name) for name in names if name]
+
+    if provider == "openai-codex":
+        return []
 
     if provider == "ollama":
         models = payload.get("models")
@@ -343,6 +489,14 @@ def extract_stream_response_chunk(event_payload: dict[str, Any], provider: str) 
         if not isinstance(delta, dict):
             return ""
         return "".join(extract_text_parts(delta.get("content")))
+    if provider == "openai-codex":
+        if event_payload.get("type") == "response.output_text.delta":
+            delta = event_payload.get("delta")
+            return delta if isinstance(delta, str) else ""
+        if event_payload.get("type") == "response.refusal.delta":
+            delta = event_payload.get("delta")
+            return delta if isinstance(delta, str) else ""
+        return ""
     if provider == "ollama":
         response = event_payload.get("response")
         return response if isinstance(response, str) else ""
@@ -361,6 +515,10 @@ def extract_stream_reasoning_chunk(event_payload: dict[str, Any], provider: str)
         if not isinstance(delta, dict):
             return ""
         return "".join(extract_text_parts(delta.get("reasoning_content")))
+    if provider == "openai-codex":
+        if event_payload.get("type") == "response.reasoning_summary_text.delta":
+            delta = event_payload.get("delta")
+            return delta if isinstance(delta, str) else ""
     return ""
 
 
@@ -377,6 +535,25 @@ def extract_response(response_payload: dict[str, Any], provider: str) -> str:
             return ""
         content = message.get("content")
         return "".join(extract_text_parts(content))
+    if provider == "openai-codex":
+        output = response_payload.get("output")
+        if not isinstance(output, list):
+            return ""
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                if part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
+                    parts.append(part["refusal"])
+        return "".join(parts)
     if provider == "ollama":
         response = response_payload.get("response")
         return response if isinstance(response, str) else ""
@@ -390,13 +567,13 @@ async def collect_stream_response(
     last_payload: dict[str, Any] | None = None
     chunk_count = 0
     first_response_latency_s: float | None = None
-    first_content_latency_s: float | None = None
+    first_token_latency_s: float | None = None
 
     async for raw_line in resp.content:
         line = raw_line.decode("utf-8").strip()
         if not line:
             continue
-        if provider == "openai":
+        if provider in {"openai", "openai-codex"}:
             if not line.startswith("data:"):
                 continue
             line = line[5:].strip()
@@ -416,8 +593,8 @@ async def collect_stream_response(
         log_json_content(debug_content, "response_json", event_payload)
         response_part = extract_stream_response_chunk(event_payload, provider)
         reasoning_part = extract_stream_reasoning_chunk(event_payload, provider)
-        if first_content_latency_s is None and (response_part or reasoning_part):
-            first_content_latency_s = now - start_time
+        if first_token_latency_s is None and (response_part or reasoning_part):
+            first_token_latency_s = now - start_time
         if response_part:
             response_parts.append(response_part)
 
@@ -426,7 +603,7 @@ async def collect_stream_response(
         last_payload,
         chunk_count,
         first_response_latency_s,
-        first_content_latency_s,
+        first_token_latency_s,
     )
 
 
@@ -439,7 +616,7 @@ async def collect_response(
             response_payload,
             chunk_count,
             first_response_latency_s,
-            first_content_latency_s,
+            first_token_latency_s,
         ) = await collect_stream_response(resp, provider, debug_content, start_time)
         return (
             response_text,
@@ -447,7 +624,7 @@ async def collect_response(
             None,
             chunk_count,
             first_response_latency_s,
-            first_content_latency_s,
+            first_token_latency_s,
         )
 
     text = await resp.text()
@@ -478,9 +655,11 @@ async def list_models(
     base_url: str,
     api_key: str | None,
     oauth_access_token: str | None,
+    account_id: str | None,
+    stream: bool,
     timeout_s: float,
 ) -> list[str]:
-    headers = make_headers(provider, api_key, oauth_access_token)
+    headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
     url = models_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
 
@@ -506,6 +685,7 @@ async def test_request(
     model: str,
     api_key: str | None,
     oauth_access_token: str | None,
+    account_id: str | None,
     prompt: str,
     thinking_level: str | None,
     thinking_key: str,
@@ -517,7 +697,7 @@ async def test_request(
     debug_content: bool,
     stream: bool,
 ) -> int:
-    headers = make_headers(provider, api_key, oauth_access_token)
+    headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     payload = make_request_payload(
@@ -554,14 +734,14 @@ async def test_request(
                 _,
                 stream_chunks,
                 first_response_latency_s,
-                first_content_latency_s,
+                first_token_latency_s,
             ) = await collect_response(resp, provider, stream, debug_content, start)
             if stream_chunks is not None:
                 LOGGER.info(
-                    "stream chunks received=%s first_response_latency_s=%.4f first_content_latency_s=%.4f",
+                    "stream chunks received=%s first_response_latency_s=%.4f first_token_latency_s=%.4f",
                     stream_chunks,
                     first_response_latency_s if first_response_latency_s is not None else -1.0,
-                    first_content_latency_s if first_content_latency_s is not None else -1.0,
+                    first_token_latency_s if first_token_latency_s is not None else -1.0,
                 )
             print(f"response: {response_text}")
     return 0
@@ -597,7 +777,7 @@ async def one_request(
                     thinking_level=thinking_level,
                     latency_s=latency_s,
                     first_response_latency_s=None,
-                    first_content_latency_s=None,
+                    first_token_latency_s=None,
                     output_tokens=None,
                     tokens_per_s=None,
                     stream_chunks=None,
@@ -611,7 +791,7 @@ async def one_request(
                 raw_text,
                 stream_chunks,
                 first_response_latency_s,
-                first_content_latency_s,
+                first_token_latency_s,
             ) = await collect_response(resp, provider, stream, debug_content, start)
             latency_s = time.perf_counter() - start
             if response_payload is None:
@@ -623,7 +803,7 @@ async def one_request(
                     thinking_level=thinking_level,
                     latency_s=latency_s,
                     first_response_latency_s=first_response_latency_s,
-                    first_content_latency_s=first_content_latency_s,
+                    first_token_latency_s=first_token_latency_s,
                     output_tokens=None,
                     tokens_per_s=None,
                     stream_chunks=stream_chunks,
@@ -639,10 +819,10 @@ async def one_request(
             )
             if stream_chunks is not None:
                 LOGGER.info(
-                    "stream chunks received=%s first_response_latency_s=%.4f first_content_latency_s=%.4f",
+                    "stream chunks received=%s first_response_latency_s=%.4f first_token_latency_s=%.4f",
                     stream_chunks,
                     first_response_latency_s if first_response_latency_s is not None else -1.0,
-                    first_content_latency_s if first_content_latency_s is not None else -1.0,
+                    first_token_latency_s if first_token_latency_s is not None else -1.0,
                 )
             return RequestResult(
                 ok=True,
@@ -652,7 +832,7 @@ async def one_request(
                 thinking_level=thinking_level,
                 latency_s=latency_s,
                 first_response_latency_s=first_response_latency_s,
-                first_content_latency_s=first_content_latency_s,
+                first_token_latency_s=first_token_latency_s,
                 output_tokens=output_tokens,
                 tokens_per_s=tokens_per_s,
                 stream_chunks=stream_chunks,
@@ -669,7 +849,7 @@ async def one_request(
             thinking_level=thinking_level,
             latency_s=latency_s,
             first_response_latency_s=None,
-            first_content_latency_s=None,
+            first_token_latency_s=None,
             output_tokens=None,
             tokens_per_s=None,
             stream_chunks=None,
@@ -686,6 +866,7 @@ async def run_point(
     model: str,
     api_key: str | None,
     oauth_access_token: str | None,
+    account_id: str | None,
     prompt: str,
     concurrency: int,
     rounds: int,
@@ -700,7 +881,7 @@ async def run_point(
     debug_content: bool,
     stream: bool,
 ) -> tuple[PointSummary, list[RequestResult]]:
-    headers = make_headers(provider, api_key, oauth_access_token)
+    headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
 
@@ -781,8 +962,8 @@ def summarize_point(
     first_response_latencies = [
         r.first_response_latency_s for r in results if r.first_response_latency_s is not None
     ]
-    first_content_latencies = [
-        r.first_content_latency_s for r in results if r.first_content_latency_s is not None
+    first_token_latencies = [
+        r.first_token_latency_s for r in results if r.first_token_latency_s is not None
     ]
     tps_values = [r.tokens_per_s for r in results if r.tokens_per_s is not None]
     output_tokens = [r.output_tokens for r in results if r.output_tokens is not None]
@@ -816,16 +997,12 @@ def summarize_point(
         first_response_latency_max_s=max(first_response_latencies)
         if first_response_latencies
         else None,
-        first_content_latency_min_s=min(first_content_latencies)
-        if first_content_latencies
-        else None,
-        first_content_latency_mean_s=(
-            statistics.fmean(first_content_latencies) if first_content_latencies else None
+        first_token_latency_min_s=min(first_token_latencies) if first_token_latencies else None,
+        first_token_latency_mean_s=(
+            statistics.fmean(first_token_latencies) if first_token_latencies else None
         ),
-        first_content_latency_p50_s=percentile(first_content_latencies, 0.50),
-        first_content_latency_max_s=max(first_content_latencies)
-        if first_content_latencies
-        else None,
+        first_token_latency_p50_s=percentile(first_token_latencies, 0.50),
+        first_token_latency_max_s=max(first_token_latencies) if first_token_latencies else None,
         throughput_mean_tokens_s=statistics.fmean(tps_values) if tps_values else None,
         throughput_sum_tokens_s=sum(tps_values) if tps_values else None,
         throughput_wall_tokens_s=(sum(output_tokens) / wall_time_s)
@@ -852,10 +1029,10 @@ def print_summary_table(summaries: list[PointSummary]) -> None:
         "ttfb_mean",
         "ttfb_p50",
         "ttfb_max",
-        "ttfc_min",
-        "ttfc_mean",
-        "ttfc_p50",
-        "ttfc_max",
+        "ttft_min",
+        "ttft_mean",
+        "ttft_p50",
+        "ttft_max",
         "tps_mean",
         "tps_wall",
         "tokens",
@@ -879,10 +1056,10 @@ def print_summary_table(summaries: list[PointSummary]) -> None:
                 fmt_float(s.first_response_latency_mean_s),
                 fmt_float(s.first_response_latency_p50_s),
                 fmt_float(s.first_response_latency_max_s),
-                fmt_float(s.first_content_latency_min_s),
-                fmt_float(s.first_content_latency_mean_s),
-                fmt_float(s.first_content_latency_p50_s),
-                fmt_float(s.first_content_latency_max_s),
+                fmt_float(s.first_token_latency_min_s),
+                fmt_float(s.first_token_latency_mean_s),
+                fmt_float(s.first_token_latency_p50_s),
+                fmt_float(s.first_token_latency_max_s),
                 fmt_float(s.throughput_mean_tokens_s),
                 fmt_float(s.throughput_wall_tokens_s),
                 str(s.total_output_tokens),
@@ -934,6 +1111,7 @@ async def run_warmup(
     model: str,
     api_key: str | None,
     oauth_access_token: str | None,
+    account_id: str | None,
     prompt: str,
     thinking_level: str | None,
     thinking_key: str,
@@ -950,7 +1128,7 @@ async def run_warmup(
     if warmup_runs <= 0:
         return
 
-    headers = make_headers(provider, api_key, oauth_access_token)
+    headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     payload = make_request_payload(
@@ -1011,7 +1189,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=["openai", "ollama"],
+        choices=["openai", "openai-codex", "ollama"],
         required=True,
         help="Target API provider",
     )
@@ -1021,7 +1199,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="default",
         help="Provider-specific API flavor",
     )
-    parser.add_argument("--base-url", required=True, help="Server base URL")
+    parser.add_argument(
+        "--base-url",
+        help="Server base URL (defaults to https://chatgpt.com/backend-api for provider=openai-codex)",
+    )
     parser.add_argument("--model", help="Model name to query")
     parser.add_argument(
         "--list-models",
@@ -1037,6 +1218,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--oauth-access-token",
         help="OAuth bearer access token for OpenAI-compatible APIs",
+    )
+    parser.add_argument(
+        "--auth-with",
+        choices=["pi"],
+        help="Load authentication from a local tool config instead of CLI tokens",
     )
     parser.add_argument("--prompt", help="Prompt text for benchmark or test request")
     parser.add_argument("--prompt-file", help="Read prompt text from file")
@@ -1057,12 +1243,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--thinking-key", default="thinking_level", help="Request field used for thinking level"
     )
     parser.add_argument(
-        "--max-tokens", type=int, default=1024, help="Maximum output tokens to request"
+        "--max-tokens", type=int, default=None, help="Maximum output tokens to request"
     )
     parser.add_argument(
         "--no-max-tokens", action="store_true", help="Omit max_tokens from the request"
     )
-    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    parser.add_argument("--temperature", type=float, default=None, help="Sampling temperature")
     parser.add_argument(
         "--no-temperature", action="store_true", help="Omit temperature from the request"
     )
@@ -1089,8 +1275,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    if not args.base_url:
+        if args.provider == "openai-codex":
+            args.base_url = "https://chatgpt.com/backend-api"
+        else:
+            raise SystemExit("--base-url is required")
+
     validate_args(args)
     configure_logging(args.debug, args.quiet, args.log_file)
+    resolved_api_key, resolved_oauth_access_token, resolved_account_id = resolve_auth(
+        args.auth_with, args.api_key, args.oauth_access_token
+    )
     run_timestamp = datetime.now()
     run_timestamp_iso = run_timestamp.isoformat(timespec="seconds")
 
@@ -1098,8 +1293,10 @@ async def async_main(args: argparse.Namespace) -> int:
         models = await list_models(
             provider=args.provider,
             base_url=args.base_url,
-            api_key=args.api_key,
-            oauth_access_token=args.oauth_access_token,
+            api_key=resolved_api_key,
+            oauth_access_token=resolved_oauth_access_token,
+            account_id=resolved_account_id,
+            stream=args.stream,
             timeout_s=args.timeout,
         )
         for model_name in models:
@@ -1122,8 +1319,9 @@ async def async_main(args: argparse.Namespace) -> int:
             api_variant=args.api_variant,
             base_url=args.base_url,
             model=args.model,
-            api_key=args.api_key,
-            oauth_access_token=args.oauth_access_token,
+            api_key=resolved_api_key,
+            oauth_access_token=resolved_oauth_access_token,
+            account_id=resolved_account_id,
             prompt=prompt,
             thinking_level=thinking_levels[0],
             thinking_key=args.thinking_key,
@@ -1143,8 +1341,9 @@ async def async_main(args: argparse.Namespace) -> int:
         api_variant=args.api_variant,
         base_url=args.base_url,
         model=args.model,
-        api_key=args.api_key,
-        oauth_access_token=args.oauth_access_token,
+        api_key=resolved_api_key,
+        oauth_access_token=resolved_oauth_access_token,
+        account_id=resolved_account_id,
         prompt=warmup_prompt,
         thinking_level=thinking_levels[0],
         thinking_key=args.thinking_key,
@@ -1179,8 +1378,9 @@ async def async_main(args: argparse.Namespace) -> int:
                 api_variant=args.api_variant,
                 base_url=args.base_url,
                 model=args.model,
-                api_key=args.api_key,
-                oauth_access_token=args.oauth_access_token,
+                api_key=resolved_api_key,
+                oauth_access_token=resolved_oauth_access_token,
+                account_id=resolved_account_id,
                 prompt=prompt,
                 concurrency=concurrency,
                 rounds=args.rounds,
@@ -1217,6 +1417,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 "api_variant": args.api_variant,
                 "base_url": args.base_url,
                 "model": args.model,
+                "auth_with": args.auth_with,
                 "concurrency": concurrencies,
                 "rounds": args.rounds,
                 "warmup_runs": args.warmup_runs,
