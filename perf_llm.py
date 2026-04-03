@@ -104,6 +104,8 @@ def validate_args(args: argparse.Namespace) -> None:
     validate_positive_int("--rounds", args.rounds)
     validate_positive_int("--warmup-runs", args.warmup_runs, allow_zero=True)
     validate_positive_float("--timeout", args.timeout)
+    if args.api_key and args.oauth_access_token:
+        LOGGER.warning("Both --api-key and --oauth-access-token were provided; using OAuth token")
     if args.max_tokens is not None:
         validate_positive_int("--max-tokens", args.max_tokens)
     if args.ctx_size is not None:
@@ -189,10 +191,13 @@ def log_json_content(enabled: bool, label: str, payload: Any) -> None:
     LOGGER.debug("%s: %s", label, rendered)
 
 
-def make_headers(provider: str, api_key: str | None) -> dict[str, str]:
+def make_headers(
+    provider: str, api_key: str | None, oauth_access_token: str | None
+) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
-    if provider == "openai" and api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    bearer_token = oauth_access_token or api_key
+    if provider == "openai" and bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
     return headers
 
 
@@ -468,9 +473,14 @@ async def collect_response(
 
 
 async def list_models(
-    *, provider: str, base_url: str, api_key: str | None, timeout_s: float
+    *,
+    provider: str,
+    base_url: str,
+    api_key: str | None,
+    oauth_access_token: str | None,
+    timeout_s: float,
 ) -> list[str]:
-    headers = make_headers(provider, api_key)
+    headers = make_headers(provider, api_key, oauth_access_token)
     url = models_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
 
@@ -495,6 +505,7 @@ async def test_request(
     base_url: str,
     model: str,
     api_key: str | None,
+    oauth_access_token: str | None,
     prompt: str,
     thinking_level: str | None,
     thinking_key: str,
@@ -506,7 +517,7 @@ async def test_request(
     debug_content: bool,
     stream: bool,
 ) -> int:
-    headers = make_headers(provider, api_key)
+    headers = make_headers(provider, api_key, oauth_access_token)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     payload = make_request_payload(
@@ -674,6 +685,7 @@ async def run_point(
     base_url: str,
     model: str,
     api_key: str | None,
+    oauth_access_token: str | None,
     prompt: str,
     concurrency: int,
     rounds: int,
@@ -688,7 +700,7 @@ async def run_point(
     debug_content: bool,
     stream: bool,
 ) -> tuple[PointSummary, list[RequestResult]]:
-    headers = make_headers(provider, api_key)
+    headers = make_headers(provider, api_key, oauth_access_token)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
 
@@ -921,6 +933,7 @@ async def run_warmup(
     base_url: str,
     model: str,
     api_key: str | None,
+    oauth_access_token: str | None,
     prompt: str,
     thinking_level: str | None,
     thinking_key: str,
@@ -937,7 +950,7 @@ async def run_warmup(
     if warmup_runs <= 0:
         return
 
-    headers = make_headers(provider, api_key)
+    headers = make_headers(provider, api_key, oauth_access_token)
     url = endpoint_url(provider, base_url)
     timeout = aiohttp.ClientTimeout(total=timeout_s)
     payload = make_request_payload(
@@ -1020,7 +1033,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Send one request payload and print the raw response, without benchmarking",
     )
-    parser.add_argument("--api-key", help="Bearer token for OpenAI-compatible APIs")
+    parser.add_argument("--api-key", help="API key bearer token for OpenAI-compatible APIs")
+    parser.add_argument(
+        "--oauth-access-token",
+        help="OAuth bearer access token for OpenAI-compatible APIs",
+    )
     parser.add_argument("--prompt", help="Prompt text for benchmark or test request")
     parser.add_argument("--prompt-file", help="Read prompt text from file")
     parser.add_argument(
@@ -1082,6 +1099,7 @@ async def async_main(args: argparse.Namespace) -> int:
             provider=args.provider,
             base_url=args.base_url,
             api_key=args.api_key,
+            oauth_access_token=args.oauth_access_token,
             timeout_s=args.timeout,
         )
         for model_name in models:
@@ -1105,6 +1123,7 @@ async def async_main(args: argparse.Namespace) -> int:
             base_url=args.base_url,
             model=args.model,
             api_key=args.api_key,
+            oauth_access_token=args.oauth_access_token,
             prompt=prompt,
             thinking_level=thinking_levels[0],
             thinking_key=args.thinking_key,
@@ -1125,6 +1144,7 @@ async def async_main(args: argparse.Namespace) -> int:
         base_url=args.base_url,
         model=args.model,
         api_key=args.api_key,
+        oauth_access_token=args.oauth_access_token,
         prompt=warmup_prompt,
         thinking_level=thinking_levels[0],
         thinking_key=args.thinking_key,
@@ -1160,6 +1180,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 base_url=args.base_url,
                 model=args.model,
                 api_key=args.api_key,
+                oauth_access_token=args.oauth_access_token,
                 prompt=prompt,
                 concurrency=concurrency,
                 rounds=args.rounds,

@@ -118,6 +118,16 @@ perf-llm --provider openai --base-url http://localhost:8000 --list-models
 perf-llm --provider ollama --base-url http://localhost:11434 --list-models
 ```
 
+Authenticate to an OpenAI-compatible endpoint with an OAuth access token:
+
+```bash
+perf-llm \
+  --provider openai \
+  --base-url http://localhost:8000 \
+  --model my-model \
+  --oauth-access-token "$ACCESS_TOKEN"
+```
+
 Send one test request without benchmarking:
 
 ```bash
@@ -168,6 +178,8 @@ Notes:
 - For `provider=ollama`, `--api-variant` must stay `default`.
 - If thinking level is omitted or set to `default`, it is not sent in the request.
 - If thinking level is set to `none`, mlx disables thinking explicitly and Ollama sends the value through `--thinking-key`.
+- OpenAI-compatible authentication supports either `--api-key` or `--oauth-access-token`.
+- If both are provided, `--oauth-access-token` takes precedence.
 - Logging uses the standard Python logging interface.
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
 - `--log-file` writes logs to a file instead of stderr.
