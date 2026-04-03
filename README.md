@@ -48,7 +48,7 @@ ping
 Benchmark an OpenAI-compatible endpoint:
 
 ```bash
-perf-llm \
+perf-llm bench \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -68,7 +68,7 @@ Streaming is enabled by default in benchmark and test mode.
 Disable it when needed:
 
 ```bash
-perf-llm \
+perf-llm bench \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -79,7 +79,7 @@ perf-llm \
 Omit a setting from requests when needed:
 
 ```bash
-perf-llm \
+perf-llm bench \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -90,7 +90,7 @@ perf-llm \
 Use the MLX-compatible OpenAI variant when needed:
 
 ```bash
-perf-llm \
+perf-llm bench \
   --provider openai \
   --api-variant mlx \
   --base-url http://localhost:8000 \
@@ -101,7 +101,7 @@ perf-llm \
 Benchmark the OpenAI Codex Responses API with Pi authentication:
 
 ```bash
-perf-llm \
+perf-llm bench \
   --provider openai-codex \
   --model gpt-5.4 \
   --auth-with pi
@@ -112,7 +112,7 @@ Benchmark an Ollama endpoint:
 Example against an Ollama server:
 
 ```bash
-perf-llm \
+perf-llm bench \
   --provider ollama \
   --base-url http://localhost:11434 \
   --model llama3 \
@@ -124,14 +124,14 @@ perf-llm \
 List models:
 
 ```bash
-perf-llm --provider openai --base-url http://localhost:8000 --list-models
-perf-llm --provider ollama --base-url http://localhost:11434 --list-models
+perf-llm list --provider openai --base-url http://localhost:8000
+perf-llm list --provider ollama --base-url http://localhost:11434
 ```
 
 Authenticate to an OpenAI-compatible endpoint with an OAuth access token:
 
 ```bash
-perf-llm \
+perf-llm test \
   --provider openai \
   --base-url http://localhost:8000 \
   --model my-model \
@@ -141,21 +141,19 @@ perf-llm \
 Send one test request without benchmarking:
 
 ```bash
-perf-llm \
+perf-llm test \
   --provider openai \
   --base-url http://localhost:8000 \
-  --model my-model \
-  --test-request
+  --model my-model
 ```
 
 Streaming is also enabled by default for test mode:
 
 ```bash
-perf-llm \
+perf-llm test \
   --provider openai \
   --base-url http://localhost:8000 \
-  --model my-model \
-  --test-request
+  --model my-model
 ```
 
 This prints only:
@@ -166,19 +164,19 @@ This prints only:
 Enable debug logs:
 
 ```bash
-perf-llm --provider ollama --base-url http://localhost:11434 --list-models --debug
+perf-llm list --provider ollama --base-url http://localhost:11434 --debug
 ```
 
 Write logs to a file instead of stderr:
 
 ```bash
-perf-llm --provider ollama --base-url http://localhost:11434 --model llama3 --log-file perf-llm.log
+perf-llm bench --provider ollama --base-url http://localhost:11434 --model llama3 --log-file perf-llm.log
 ```
 
 Reduce log output to warnings only:
 
 ```bash
-perf-llm --provider ollama --base-url http://localhost:11434 --model llama3 --quiet
+perf-llm bench --provider ollama --base-url http://localhost:11434 --model llama3 --quiet
 ```
 
 Notes:
@@ -192,19 +190,20 @@ Notes:
 - Use `--auth-with pi` to load a token from `~/.pi/agent/auth.json`.
 - If both are provided, `--oauth-access-token` takes precedence.
 - `openai-codex` uses the Codex Responses API, requires streaming mode, and defaults `--base-url` to `https://chatgpt.com/backend-api`.
+- `openai-codex` does not support the `list` subcommand.
 - `openai-codex` does not support `--max-tokens`; use `--no-max-tokens` or leave it unset.
 - `openai-codex` does not support `--temperature`; use `--no-temperature` or leave it unset.
 - Logging uses the standard Python logging interface.
 - Default log level is `INFO`, `--debug` sets `DEBUG`, and `--quiet` sets `WARNING`.
 - `--log-file` writes logs to a file instead of stderr.
-- `--debug-content` logs request and response JSON content as one-line JSON at debug level.
+- `--debug-content` logs request content and raw response content as one-line debug output.
 - `--csv-file` writes the summary CSV to an explicit path.
 - `--no-csv` disables the default summary CSV output.
 - `--prompt-warmup` sets the warmup prompt and defaults to `ping`.
 - Benchmark/test prompt defaults to `ping`.
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.
 - Use `--no-max-tokens` or `--no-temperature` to omit them from requests.
-- `--test-request` sends one payload and prints the response without running a benchmark.
+- Use the `test` subcommand to send one payload and print the response without running a benchmark.
 - Streaming is enabled by default for benchmark and test requests.
 - Use `--no-stream` to disable streaming.
 - `--ctx-size` is applied when supported by the target API.

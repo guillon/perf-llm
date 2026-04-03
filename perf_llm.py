@@ -125,6 +125,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--api-variant is only supported for provider=openai")
     if args.provider == "openai-codex" and args.api_variant != "default":
         raise SystemExit("--api-variant is only supported for provider=openai")
+    if args.provider == "openai-codex" and args.command == "list":
+        raise SystemExit("provider=openai-codex does not support the list subcommand")
     if args.provider == "openai-codex" and not args.stream:
         raise SystemExit("provider=openai-codex requires streaming; --no-stream is unsupported")
     try:
@@ -267,10 +269,13 @@ def configure_logging(debug: bool, quiet: bool, log_file: str | None) -> None:
 def log_json_content(enabled: bool, label: str, payload: Any) -> None:
     if not enabled:
         return
-    try:
-        rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    except TypeError:
-        rendered = repr(payload)
+    if isinstance(payload, str):
+        rendered = payload.replace("\n", "\\n")
+    else:
+        try:
+            rendered = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        except TypeError:
+            rendered = repr(payload)
     LOGGER.debug("%s: %s", label, rendered)
 
 
@@ -443,15 +448,12 @@ def models_url(provider: str, base_url: str) -> str:
 
 
 def extract_model_names(provider: str, payload: dict[str, Any]) -> list[str]:
-    if provider == "openai":
+    if provider in {"openai", "openai-codex"}:
         data = payload.get("data")
         if not isinstance(data, list):
             return []
         names = [item.get("id") for item in data if isinstance(item, dict)]
         return [str(name) for name in names if name]
-
-    if provider == "openai-codex":
-        return []
 
     if provider == "ollama":
         models = payload.get("models")
@@ -579,6 +581,7 @@ async def collect_stream_response(
             line = line[5:].strip()
             if line == "[DONE]":
                 continue
+        log_json_content(debug_content, "response_raw", line)
         try:
             event_payload = json.loads(line)
         except json.JSONDecodeError:
@@ -590,7 +593,6 @@ async def collect_stream_response(
         now = time.perf_counter()
         if first_response_latency_s is None:
             first_response_latency_s = now - start_time
-        log_json_content(debug_content, "response_json", event_payload)
         response_part = extract_stream_response_chunk(event_payload, provider)
         reasoning_part = extract_stream_reasoning_chunk(event_payload, provider)
         if first_token_latency_s is None and (response_part or reasoning_part):
@@ -628,14 +630,13 @@ async def collect_response(
         )
 
     text = await resp.text()
+    log_json_content(debug_content, "response_raw", text)
     try:
         response_payload = json.loads(text)
     except json.JSONDecodeError:
-        log_json_content(debug_content, "response_json", text)
         return text, None, text, None, None, None
 
     if isinstance(response_payload, dict):
-        log_json_content(debug_content, "response_json", response_payload)
         return (
             extract_response(response_payload, provider),
             response_payload,
@@ -645,7 +646,6 @@ async def collect_response(
             None,
         )
 
-    log_json_content(debug_content, "response_json", response_payload)
     return text, None, text, None, None, None
 
 
@@ -658,6 +658,7 @@ async def list_models(
     account_id: str | None,
     stream: bool,
     timeout_s: float,
+    debug_content: bool,
 ) -> list[str]:
     headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
     url = models_url(provider, base_url)
@@ -667,6 +668,7 @@ async def list_models(
         LOGGER.debug("GET %s", url)
         async with session.get(url, headers=headers) as resp:
             text = await resp.text()
+            log_json_content(debug_content, "response_raw", text)
             if resp.status >= 400:
                 raise SystemExit(f"Failed to list models: HTTP {resp.status}: {text[:500]}")
             try:
@@ -1146,13 +1148,19 @@ async def run_warmup(
     )
 
     LOGGER.info(
-        "warmup provider=%s api_variant=%s model=%s thinking=%r runs=%s stream=%s",
+        "warmup provider=%s api_variant=%s model=%s prompt=%r thinking=%r thinking_key=%s max_tokens=%r temperature=%r ctx_size=%r stream=%s extra_body_json=%r runs=%s",
         provider,
         api_variant,
         model,
+        prompt,
         thinking_level,
-        warmup_runs,
+        thinking_key,
+        max_tokens,
+        temperature,
+        ctx_size,
         stream,
+        extra_body_json,
+        warmup_runs,
     )
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1182,11 +1190,7 @@ async def run_warmup(
                 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Benchmark OpenAI-compatible and Ollama text completion servers",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
         choices=["openai", "openai-codex", "ollama"],
@@ -1204,16 +1208,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Server base URL (defaults to https://chatgpt.com/backend-api for provider=openai-codex)",
     )
     parser.add_argument("--model", help="Model name to query")
-    parser.add_argument(
-        "--list-models",
-        action="store_true",
-        help="List models available on the base URL and exit",
-    )
-    parser.add_argument(
-        "--test-request",
-        action="store_true",
-        help="Send one request payload and print the raw response, without benchmarking",
-    )
     parser.add_argument("--api-key", help="API key bearer token for OpenAI-compatible APIs")
     parser.add_argument(
         "--oauth-access-token",
@@ -1226,18 +1220,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--prompt", help="Prompt text for benchmark or test request")
     parser.add_argument("--prompt-file", help="Read prompt text from file")
-    parser.add_argument(
-        "--prompt-warmup",
-        default=DEFAULT_WARMUP_PROMPT,
-        help="Prompt text used for warmup requests",
-    )
-    parser.add_argument(
-        "--concurrency",
-        default="1",
-        help="Comma-separated concurrency levels, e.g. 1,2,4",
-    )
-    parser.add_argument("--rounds", type=int, default=1, help="Rounds per benchmark point")
-    parser.add_argument("--warmup-runs", type=int, default=1, help="Number of warmup requests")
     parser.add_argument("--thinking-level", default=None, help="Comma-separated thinking levels")
     parser.add_argument(
         "--thinking-key", default="thinking_level", help="Request field used for thinking level"
@@ -1257,9 +1239,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--extra-body-json", default=None, help="Extra JSON object merged into the request body"
     )
-    parser.add_argument("--output-json", help="Write detailed results to a JSON file")
-    parser.add_argument("--csv-file", help="Write summary CSV to this file")
-    parser.add_argument("--no-csv", action="store_true", help="Disable default CSV output")
     parser.add_argument("--verbose", action="store_true", help="Log per-request failures")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
@@ -1271,6 +1250,53 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-stream", action="store_false", dest="stream", help="Disable streaming mode"
     )
     parser.add_argument("--quiet", action="store_true", help="Only log warnings and errors")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Benchmark OpenAI-compatible and Ollama text completion servers",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    bench_parser = subparsers.add_parser(
+        "bench",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Run a benchmark",
+    )
+    add_common_args(bench_parser)
+    bench_parser.add_argument(
+        "--prompt-warmup",
+        default=DEFAULT_WARMUP_PROMPT,
+        help="Prompt text used for warmup requests",
+    )
+    bench_parser.add_argument(
+        "--concurrency",
+        default="1",
+        help="Comma-separated concurrency levels, e.g. 1,2,4",
+    )
+    bench_parser.add_argument("--rounds", type=int, default=1, help="Rounds per benchmark point")
+    bench_parser.add_argument(
+        "--warmup-runs", type=int, default=1, help="Number of warmup requests"
+    )
+    bench_parser.add_argument("--output-json", help="Write detailed results to a JSON file")
+    bench_parser.add_argument("--csv-file", help="Write summary CSV to this file")
+    bench_parser.add_argument("--no-csv", action="store_true", help="Disable default CSV output")
+
+    list_parser = subparsers.add_parser(
+        "list",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="List available models",
+    )
+    add_common_args(list_parser)
+
+    test_parser = subparsers.add_parser(
+        "test",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        help="Send one test request",
+    )
+    add_common_args(test_parser)
+
     return parser
 
 
@@ -1281,7 +1307,9 @@ async def async_main(args: argparse.Namespace) -> int:
         else:
             raise SystemExit("--base-url is required")
 
-    validate_args(args)
+    if args.command == "bench":
+        validate_args(args)
+
     configure_logging(args.debug, args.quiet, args.log_file)
     resolved_api_key, resolved_oauth_access_token, resolved_account_id = resolve_auth(
         args.auth_with, args.api_key, args.oauth_access_token
@@ -1289,7 +1317,7 @@ async def async_main(args: argparse.Namespace) -> int:
     run_timestamp = datetime.now()
     run_timestamp_iso = run_timestamp.isoformat(timespec="seconds")
 
-    if args.list_models:
+    if args.command == "list":
         models = await list_models(
             provider=args.provider,
             base_url=args.base_url,
@@ -1298,22 +1326,22 @@ async def async_main(args: argparse.Namespace) -> int:
             account_id=resolved_account_id,
             stream=args.stream,
             timeout_s=args.timeout,
+            debug_content=args.debug_content,
         )
         for model_name in models:
             print(model_name)
         return 0
 
     if not args.model:
-        raise SystemExit("--model is required unless --list-models is used")
+        raise SystemExit("--model is required for bench and test")
 
     effective_max_tokens = None if args.no_max_tokens else args.max_tokens
     effective_temperature = None if args.no_temperature else args.temperature
 
     prompt = load_prompt(args)
-    warmup_prompt = load_warmup_prompt(args, prompt)
     thinking_levels = parse_csv_strings(args.thinking_level)
 
-    if args.test_request:
+    if args.command == "test":
         return await test_request(
             provider=args.provider,
             api_variant=args.api_variant,
@@ -1334,6 +1362,7 @@ async def async_main(args: argparse.Namespace) -> int:
             stream=args.stream,
         )
 
+    warmup_prompt = load_warmup_prompt(args, prompt)
     concurrencies = parse_csv_ints(args.concurrency)
 
     await run_warmup(
@@ -1364,14 +1393,20 @@ async def async_main(args: argparse.Namespace) -> int:
     for thinking_level in thinking_levels:
         for concurrency in concurrencies:
             LOGGER.info(
-                "run provider=%s api_variant=%s model=%s thinking=%r concurrency=%s rounds=%s stream=%s",
+                "run provider=%s api_variant=%s model=%s prompt=%r thinking=%r thinking_key=%s max_tokens=%r temperature=%r ctx_size=%r concurrency=%s rounds=%s stream=%s extra_body_json=%r",
                 args.provider,
                 args.api_variant,
                 args.model,
+                prompt,
                 thinking_level,
+                args.thinking_key,
+                effective_max_tokens,
+                effective_temperature,
+                args.ctx_size,
                 concurrency,
                 args.rounds,
                 args.stream,
+                args.extra_body_json,
             )
             summary, results = await run_point(
                 provider=args.provider,
