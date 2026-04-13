@@ -38,9 +38,10 @@ viz = [
 
 [project.scripts]
 perf-llm = "perf_llm:main"
+perf-llm-display = "perf_llm_display:main"
 
 [tool.setuptools]
-py-modules = ["perf_llm"]
+py-modules = ["perf_llm", "perf_llm_display"]
 
 [tool.ruff]
 target-version = "py310"
@@ -48,6 +49,6 @@ line-length = 100
 
 [tool.pyright]
 pythonVersion = "3.10"
-include = ["perf_llm.py"]
+include = ["perf_llm.py", "perf_llm_display.py"]
 typeCheckingMode = "basic"
 reportMissingImports = false

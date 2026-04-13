@@ -18,6 +18,7 @@ And reports:
 - streaming first-token latency (ttft): min, mean, median, max
 - throughput in tokens/sec, average and wall-clock throughput
 - CSV summary output by default
+- optional plotting with `perf-llm-display`
 
 ## Install
 
@@ -30,6 +31,12 @@ pip install .
 ```
 
 See the [Development](#development) section for development mode.
+
+Install with visualization support:
+
+```bash
+pip install '.[viz]'
+```
 
 ## Quick start
 
@@ -63,6 +70,36 @@ By default, a CSV summary is written to:
 ```text
 csv/bench-YYYYMMDD-HHMMSS.csv
 ```
+
+Display figures from one or more generated CSV files:
+
+```bash
+perf-llm-display ttft csv/bench-YYYYMMDD-HHMMSS.csv
+perf-llm-display tps csv/bench-YYYYMMDD-HHMMSS.csv
+perf-llm-display lat csv/bench-YYYYMMDD-HHMMSS.csv
+perf-llm-display lat csv/bench-20260414-090000.csv csv/bench-20260414-103000.csv
+perf-llm-display lat --no-normalize csv/bench-YYYYMMDD-HHMMSS.csv
+```
+
+When multiple CSV files are provided, each input file gets an incremental source id
+starting at `1`, and figure labels are prefixed with that id, for example:
+`[1] my-model`, `[2] my-model`.
+
+You can override those ids with `--labels`:
+
+```bash
+perf-llm-display lat --labels 1=baseline,2=optimized run1.csv run2.csv
+```
+
+When `--labels` is provided, the mapping is applied only at display time.
+The internal per-file incremental ids are still assigned unchanged and remain the
+grouping key. Mapped ids are shown with their configured label, while unmapped ids
+are treated as empty, so the legend entry falls back to just the model name without
+square brackets.
+
+For `lat`, normalization is enabled by default: each series is divided by its
+latency mean at concurrency `1`. Use `--no-normalize` to show raw latency in
+seconds.
 
 Streaming is enabled by default in benchmark and test mode.
 Disable it when needed:
