@@ -118,9 +118,7 @@ def validate_args(args: argparse.Namespace) -> None:
             "provider=openai-codex does not support --temperature; use --no-temperature or omit it"
         )
     if args.provider in ["openai-codex"] and args.top_p is not None:
-        raise SystemExit(
-            "provider=openai-codex does not support --top-p"
-        )
+        raise SystemExit("provider=openai-codex does not support --top-p")
     if args.max_tokens is not None:
         validate_positive_int("--max-tokens", args.max_tokens)
     if args.ctx_size is not None:
@@ -267,10 +265,12 @@ def resolve_provider_alias(provider: str, api_variant: str | None) -> tuple[str,
     effective_api_variant = api_variant if api_variant is not None else mapped_api_variant
     return mapped_provider, effective_api_variant, provider
 
+
 def update_provider_api_options(provider: str, api_variant: str, args: argparse.Namespace) -> None:
     if args.thinking_key is None:
         if provider == "ollama":
             args.thinking_key = "think"
+
 
 def configure_logging(debug: bool, quiet: bool, log_file: str | None) -> None:
     level = logging.INFO
