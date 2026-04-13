@@ -160,6 +160,9 @@ LOGGER = logging.getLogger("perf_llm")
 PI_AUTH_PATH = Path.home() / ".pi/agent/auth.json"
 PI_JWT_AUTH_CLAIM = "https://api.openai.com/auth"
 JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
+PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
+    "openai-mlx": ("openai", "mlx"),
+}
 
 
 def load_prompt(args: argparse.Namespace) -> str:
@@ -233,7 +236,7 @@ def load_pi_auth() -> tuple[str, str | None]:
         ((path, token, account_id) for path, token, account_id in candidates if account_id),
         candidates[0],
     )
-    LOGGER.info("Loaded auth token from %s", selected_path)
+    LOGGER.info("Loaded auth token from %s %s", PI_AUTH_PATH, selected_path)
     return token, account_id
 
 
@@ -251,6 +254,19 @@ def resolve_auth(
 
     return resolved_api_key, resolved_oauth_access_token, account_id
 
+
+def resolve_provider_alias(provider: str, api_variant: str | None) -> tuple[str, str, str | None]:
+    mapping = PROVIDER_ALIASES.get(provider)
+    if not mapping:
+        return provider, api_variant or "default", None
+    mapped_provider, mapped_api_variant = mapping
+    effective_api_variant = api_variant if api_variant is not None else mapped_api_variant
+    return mapped_provider, effective_api_variant, provider
+
+def update_provider_api_options(provider: str, api_variant: str, args: argparse.Namespace) -> None:
+    if args.thinking_key is None:
+        if provider == "ollama":
+            args.thinking_key = "think"
 
 def configure_logging(debug: bool, quiet: bool, log_file: str | None) -> None:
     level = logging.INFO
@@ -416,7 +432,10 @@ def make_request_payload(
             "options": options,
         }
         if normalized_thinking_level is not None:
-            body[thinking_key] = normalized_thinking_level
+            if normalized_thinking_level == "none":
+                body[thinking_key] = False
+            else:
+                body[thinking_key] = normalized_thinking_level
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
@@ -1193,14 +1212,14 @@ async def run_warmup(
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
-        choices=["openai", "openai-codex", "ollama"],
+        choices=["openai", "openai-codex", "openai-mlx", "ollama"],
         required=True,
         help="Target API provider",
     )
     parser.add_argument(
         "--api-variant",
         choices=["default", "mlx"],
-        default="default",
+        default=None,
         help="Provider-specific API flavor",
     )
     parser.add_argument(
@@ -1222,7 +1241,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prompt-file", help="Read prompt text from file")
     parser.add_argument("--thinking-level", default=None, help="Comma-separated thinking levels")
     parser.add_argument(
-        "--thinking-key", default="thinking_level", help="Request field used for thinking level"
+        "--thinking-key", default=None, help="Request field used for thinking level"
     )
     parser.add_argument(
         "--max-tokens", type=int, default=None, help="Maximum output tokens to request"
@@ -1301,6 +1320,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    args.provider, args.api_variant, provider_alias = resolve_provider_alias(
+        args.provider, args.api_variant
+    )
+    update_provider_api_options(args.provider, args.api_variant, args)
+
     if not args.base_url:
         if args.provider == "openai-codex":
             args.base_url = "https://chatgpt.com/backend-api"
@@ -1311,6 +1335,13 @@ async def async_main(args: argparse.Namespace) -> int:
         validate_args(args)
 
     configure_logging(args.debug, args.quiet, args.log_file)
+    if provider_alias is not None:
+        LOGGER.info(
+            "Resolved provider alias %s -> provider=%s api_variant=%s",
+            provider_alias,
+            args.provider,
+            args.api_variant,
+        )
     resolved_api_key, resolved_oauth_access_token, resolved_account_id = resolve_auth(
         args.auth_with, args.api_key, args.oauth_access_token
     )

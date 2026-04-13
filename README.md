@@ -98,6 +98,16 @@ perf-llm bench \
   --thinking-level high
 ```
 
+Or use the provider alias:
+
+```bash
+perf-llm bench \
+  --provider openai-mlx \
+  --base-url http://localhost:8000 \
+  --model my-model \
+  --thinking-level high
+```
+
 Benchmark the OpenAI Codex Responses API with Pi authentication:
 
 ```bash
@@ -181,11 +191,14 @@ perf-llm bench --provider ollama --base-url http://localhost:11434 --model llama
 
 Notes:
 
+- `--provider openai-mlx` maps to `provider=openai` with default `api_variant=mlx`.
+- `--api-variant` still overrides the mapped default.
 - `--api-variant default` uses OpenAI-style `reasoning_effort` for `provider=openai` when a thinking level is set.
 - `--api-variant mlx` uses `chat_template_kwargs.enable_thinking` and `chat_template_kwargs.reasoning_effort` for `provider=openai`.
 - For `provider=ollama`, `--api-variant` must stay `default`.
 - If thinking level is omitted or set to `default`, it is not sent in the request.
-- If thinking level is set to `none`, mlx disables thinking explicitly and Ollama sends the value through `--thinking-key`.
+- If thinking level is set to `none`, thinking is explicitly set to `none` or false
+- If thinking key is not specified, the default thinking level key is used for the provider
 - OpenAI-compatible authentication supports either `--api-key` or `--oauth-access-token`.
 - Use `--auth-with pi` to load a token from `~/.pi/agent/auth.json`.
 - If both are provided, `--oauth-access-token` takes precedence.
