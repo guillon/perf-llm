@@ -117,6 +117,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(
             "provider=openai-codex does not support --temperature; use --no-temperature or omit it"
         )
+    if args.provider in ["openai-codex"] and args.top_p is not None:
+        raise SystemExit(
+            "provider=openai-codex does not support --top-p"
+        )
     if args.max_tokens is not None:
         validate_positive_int("--max-tokens", args.max_tokens)
     if args.ctx_size is not None:
@@ -353,6 +357,7 @@ def make_request_payload(
     prompt: str,
     max_tokens: int | None,
     temperature: float | None,
+    top_p: float | None,
     thinking_level: str | None,
     thinking_key: str,
     ctx_size: int | None,
@@ -377,6 +382,8 @@ def make_request_payload(
             body["max_tokens"] = max_tokens
         if temperature is not None:
             body["temperature"] = temperature
+        if temperature is not None:
+            body["top_p"] = top_p
         if api_variant == "default":
             if normalized_thinking_level == "none":
                 LOGGER.warning(
@@ -421,6 +428,8 @@ def make_request_payload(
         options: dict[str, Any] = {}
         if temperature is not None:
             options["temperature"] = temperature
+        if top_p is not None:
+            options["top_p"] = top_p
         if max_tokens is not None:
             options["num_predict"] = max_tokens
         if ctx_size is not None:
@@ -712,6 +721,7 @@ async def test_request(
     thinking_key: str,
     max_tokens: int | None,
     temperature: float | None,
+    top_p: float | None,
     ctx_size: int | None,
     timeout_s: float,
     extra_body_json: str | None,
@@ -728,6 +738,7 @@ async def test_request(
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        top_p=top_p,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
         ctx_size=ctx_size,
@@ -895,6 +906,7 @@ async def run_point(
     thinking_key: str,
     max_tokens: int | None,
     temperature: float | None,
+    top_p: float | None,
     ctx_size: int | None,
     timeout_s: float,
     extra_body_json: str | None,
@@ -913,6 +925,7 @@ async def run_point(
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        top_p=top_p,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
         ctx_size=ctx_size,
@@ -1138,6 +1151,7 @@ async def run_warmup(
     thinking_key: str,
     max_tokens: int | None,
     temperature: float | None,
+    top_p: float | None,
     ctx_size: int | None,
     timeout_s: float,
     extra_body_json: str | None,
@@ -1159,6 +1173,7 @@ async def run_warmup(
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=temperature,
+        top_p=top_p,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
         ctx_size=ctx_size,
@@ -1253,6 +1268,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-temperature", action="store_true", help="Omit temperature from the request"
     )
+    parser.add_argument("--top-p", type=float, default=None, help="Top-p nucleaus sampling")
     parser.add_argument("--ctx-size", type=int, help="Requested context size when supported")
     parser.add_argument("--timeout", type=float, default=300.0, help="Request timeout in seconds")
     parser.add_argument(
@@ -1386,6 +1402,7 @@ async def async_main(args: argparse.Namespace) -> int:
             thinking_key=args.thinking_key,
             max_tokens=effective_max_tokens,
             temperature=effective_temperature,
+            top_p=args.top_p,
             ctx_size=args.ctx_size,
             timeout_s=args.timeout,
             extra_body_json=args.extra_body_json,
@@ -1409,6 +1426,7 @@ async def async_main(args: argparse.Namespace) -> int:
         thinking_key=args.thinking_key,
         max_tokens=effective_max_tokens,
         temperature=effective_temperature,
+        top_p=args.top_p,
         ctx_size=args.ctx_size,
         timeout_s=args.timeout,
         extra_body_json=args.extra_body_json,
@@ -1453,6 +1471,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 thinking_level=thinking_level,
                 thinking_key=args.thinking_key,
                 max_tokens=effective_max_tokens,
+                top_p=args.top_p,
                 temperature=effective_temperature,
                 ctx_size=args.ctx_size,
                 timeout_s=args.timeout,
