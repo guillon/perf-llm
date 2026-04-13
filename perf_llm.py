@@ -154,7 +154,7 @@ def percentile(values: list[float], p: float) -> float | None:
     return values[low] * (1 - frac) + values[high] * frac
 
 
-DEFAULT_PROMPT = "Generate a 256 words text."
+DEFAULT_PROMPT = "Generate a short paragraph on the principle of computing."
 DEFAULT_WARMUP_PROMPT = "ping"
 LOGGER = logging.getLogger("perf_llm")
 PI_AUTH_PATH = Path.home() / ".pi/agent/auth.json"

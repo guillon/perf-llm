@@ -36,7 +36,7 @@ See the [Development](#development) section for development mode.
 Default benchmark/test prompt:
 
 ```text
-Generate a 256 words text.
+Generate a short paragraph on the principle of computing.
 ```
 
 Default warmup prompt:
