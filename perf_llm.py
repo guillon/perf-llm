@@ -17,6 +17,7 @@ import statistics
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +166,13 @@ JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
     "openai-mlx": ("openai", "mlx"),
 }
+
+
+def get_package_version() -> str:
+    try:
+        return version("perf-llm")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def load_prompt(args: argparse.Namespace) -> str:
@@ -1291,6 +1299,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Benchmark OpenAI-compatible and Ollama text completion servers",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {get_package_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

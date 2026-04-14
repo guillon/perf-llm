@@ -55,6 +55,7 @@ ping
 Benchmark an OpenAI-compatible endpoint:
 
 ```bash
+perf-llm --version
 perf-llm bench \
   --provider openai \
   --base-url http://localhost:8000 \
@@ -74,6 +75,7 @@ csv/bench-YYYYMMDD-HHMMSS.csv
 Display figures from one or more generated CSV files:
 
 ```bash
+perf-llm-display --version
 perf-llm-display ttft csv/bench-YYYYMMDD-HHMMSS.csv
 perf-llm-display tps csv/bench-YYYYMMDD-HHMMSS.csv
 perf-llm-display lat csv/bench-YYYYMMDD-HHMMSS.csv

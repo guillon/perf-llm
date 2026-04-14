@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import csv
 from collections import defaultdict
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,13 @@ def format_line_label(
     if source_label:
         return f"[{source_label}] {model_tail}"
     return model_tail
+
+
+def get_package_version() -> str:
+    try:
+        return version("perf-llm")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def require_matplotlib() -> Any:
@@ -357,6 +365,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Display figures from perf-llm CSV outputs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {get_package_version()}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
