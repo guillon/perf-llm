@@ -122,6 +122,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("provider=openai-codex does not support --top-p")
     if args.max_tokens is not None:
         validate_positive_int("--max-tokens", args.max_tokens)
+    if args.thinking_budget is not None:
+        validate_positive_int("--thinking-budget", args.thinking_budget)
     if args.ctx_size is not None:
         validate_positive_int("--ctx-size", args.ctx_size)
     if args.provider == "ollama" and args.api_variant != "default":
@@ -159,7 +161,8 @@ def percentile(values: list[float], p: float) -> float | None:
 
 DEFAULT_PROMPT = "Generate a short paragraph on the principle of computing."
 DEFAULT_WARMUP_PROMPT = "ping"
-LOGGER = logging.getLogger("perf_llm")
+LOGGER = logging.getLogger("perf_llm.default")
+LOGGER_CONTENT = logging.getLogger("perf_llm.content")
 PI_AUTH_PATH = Path.home() / ".pi/agent/auth.json"
 PI_JWT_AUTH_CLAIM = "https://api.openai.com/auth"
 JWT_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
@@ -177,6 +180,9 @@ def get_package_version() -> str:
 
 def load_prompt(args: argparse.Namespace) -> str:
     if args.prompt:
+        if args.prompt.startswith("@") and len(args.prompt) > 1:
+            prompt_file = Path(args.prompt[1:])
+            return prompt_file.read_text(encoding="utf-8")
         return args.prompt
     if args.prompt_file:
         return Path(args.prompt_file).read_text(encoding="utf-8")
@@ -280,19 +286,27 @@ def update_provider_api_options(provider: str, api_variant: str, args: argparse.
             args.thinking_key = "think"
 
 
-def configure_logging(debug: bool, quiet: bool, log_file: str | None) -> None:
-    level = logging.INFO
-    if debug:
-        level = logging.DEBUG
-    if quiet:
-        level = logging.WARNING
+def configure_logging(debug: bool, debug_content: bool, quiet: bool, log_file: str | None) -> None:
     logging.basicConfig(
-        level=level,
         format="%(levelname)s: %(message)s",
         filename=log_file,
         filemode="a" if log_file else "w",
     )
+    for flag, logger in [(debug, LOGGER), (debug_content, LOGGER_CONTENT)]:
+        level = logging.INFO
+        if flag:
+            level = logging.DEBUG
+        if quiet:
+            level = logging.WARNING
+        logger.setLevel(level)
 
+
+def json_to_str(payload: Any) -> str:
+    try:
+        rendered = json.dumps(payload)
+    except TypeError:
+        rendered = repr(payload)
+    return rendered
 
 def log_json_content(enabled: bool, label: str, payload: Any) -> None:
     if not enabled:
@@ -368,6 +382,7 @@ def make_request_payload(
     top_p: float | None,
     thinking_level: str | None,
     thinking_key: str,
+    thinking_budget: int | None,
     ctx_size: int | None,
     extra_body_json: str | None,
     stream: bool = False,
@@ -407,6 +422,8 @@ def make_request_payload(
                     "enable_thinking": True,
                     "reasoning_effort": normalized_thinking_level,
                 }
+            if thinking_budget is not None:
+                body["thinking_budget"] = thinking_budget
     elif provider == "openai-codex":
         if not stream:
             raise SystemExit("provider=openai-codex requires streaming; --no-stream is unsupported")
@@ -599,7 +616,7 @@ def extract_response(response_payload: dict[str, Any], provider: str) -> str:
 
 
 async def collect_stream_response(
-    resp: Any, provider: str, debug_content: bool, start_time: float
+    resp: Any, provider: str, start_time: float
 ) -> tuple[str, dict[str, Any] | None, int, float | None, float | None]:
     response_parts: list[str] = []
     last_payload: dict[str, Any] | None = None
@@ -617,7 +634,7 @@ async def collect_stream_response(
             line = line[5:].strip()
             if line == "[DONE]":
                 continue
-        log_json_content(debug_content, "response_raw", line)
+        LOGGER_CONTENT.debug("  RESPONSE_JSON %s", json_to_str(line))
         try:
             event_payload = json.loads(line)
         except json.JSONDecodeError:
@@ -646,7 +663,7 @@ async def collect_stream_response(
 
 
 async def collect_response(
-    resp: Any, provider: str, stream: bool, debug_content: bool, start_time: float
+    resp: Any, provider: str, stream: bool, start_time: float
 ) -> tuple[str, dict[str, Any] | None, str | None, int | None, float | None, float | None]:
     if stream:
         (
@@ -655,7 +672,7 @@ async def collect_response(
             chunk_count,
             first_response_latency_s,
             first_token_latency_s,
-        ) = await collect_stream_response(resp, provider, debug_content, start_time)
+        ) = await collect_stream_response(resp, provider, start_time)
         return (
             response_text,
             response_payload,
@@ -666,7 +683,7 @@ async def collect_response(
         )
 
     text = await resp.text()
-    log_json_content(debug_content, "response_raw", text)
+    LOGGER_CONTENT.debug("  RESPONSE_JSON %s", json_to_str(text))
     try:
         response_payload = json.loads(text)
     except json.JSONDecodeError:
@@ -694,7 +711,6 @@ async def list_models(
     account_id: str | None,
     stream: bool,
     timeout_s: float,
-    debug_content: bool,
 ) -> list[str]:
     headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
     url = models_url(provider, base_url)
@@ -702,9 +718,10 @@ async def list_models(
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         LOGGER.debug("GET %s", url)
+        LOGGER_CONTENT.debug("  HEADERS %s", headers)
         async with session.get(url, headers=headers) as resp:
             text = await resp.text()
-            log_json_content(debug_content, "response_raw", text)
+            LOGGER_CONTENT.debug("  RESPONSE_JSON %s", json_to_str(text))
             if resp.status >= 400:
                 raise SystemExit(f"Failed to list models: HTTP {resp.status}: {text[:500]}")
             try:
@@ -727,13 +744,13 @@ async def test_request(
     prompt: str,
     thinking_level: str | None,
     thinking_key: str,
+    thinking_budget: int | None,
     max_tokens: int | None,
     temperature: float | None,
     top_p: float | None,
     ctx_size: int | None,
     timeout_s: float,
     extra_body_json: str | None,
-    debug_content: bool,
     stream: bool,
 ) -> int:
     headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
@@ -749,22 +766,24 @@ async def test_request(
         top_p=top_p,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
+        thinking_budget=thinking_budget,
         ctx_size=ctx_size,
         extra_body_json=extra_body_json,
         stream=stream,
     )
 
     print(f"prompt: {prompt}")
-    log_json_content(debug_content, "request_json", payload)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         LOGGER.debug("POST %s", url)
+        LOGGER_CONTENT.debug("  HEADERS %s", headers)
+        LOGGER_CONTENT.debug("  REQUEST_JSON %s", json_to_str(payload))
         start = time.perf_counter()
         async with session.post(url, headers=headers, json=payload) as resp:
             if resp.status >= 400:
                 text = await resp.text()
                 LOGGER.warning("test request failed with HTTP %s", resp.status)
-                log_json_content(debug_content, "response_json", text)
+                LOGGER_CONTENT.debug("  RESPONSE_JSON", json_to_str(text))
                 return 1
 
             print(f"status: {resp.status}")
@@ -775,7 +794,7 @@ async def test_request(
                 stream_chunks,
                 first_response_latency_s,
                 first_token_latency_s,
-            ) = await collect_response(resp, provider, stream, debug_content, start)
+            ) = await collect_response(resp, provider, stream, start)
             if stream_chunks is not None:
                 LOGGER.info(
                     "stream chunks received=%s first_response_latency_s=%.4f first_token_latency_s=%.4f",
@@ -797,13 +816,13 @@ async def one_request(
     concurrency: int,
     round_id: int,
     thinking_level: str | None,
-    debug_content: bool,
     stream: bool,
 ) -> RequestResult:
     start = time.perf_counter()
     try:
         LOGGER.debug("POST %s", url)
-        log_json_content(debug_content, "request_json", payload)
+        LOGGER_CONTENT.debug("  HEADERS %s", headers)
+        LOGGER_CONTENT.debug("  REQUEST_JSON %s", json_to_str(payload))
         async with session.post(url, headers=headers, json=payload) as resp:
             status = resp.status
             if status >= 400:
@@ -832,7 +851,7 @@ async def one_request(
                 stream_chunks,
                 first_response_latency_s,
                 first_token_latency_s,
-            ) = await collect_response(resp, provider, stream, debug_content, start)
+            ) = await collect_response(resp, provider, stream, start)
             latency_s = time.perf_counter() - start
             if response_payload is None:
                 return RequestResult(
@@ -912,6 +931,7 @@ async def run_point(
     rounds: int,
     thinking_level: str | None,
     thinking_key: str,
+    thinking_budget: int | None,
     max_tokens: int | None,
     temperature: float | None,
     top_p: float | None,
@@ -919,7 +939,6 @@ async def run_point(
     timeout_s: float,
     extra_body_json: str | None,
     verbose: bool,
-    debug_content: bool,
     stream: bool,
 ) -> tuple[PointSummary, list[RequestResult]]:
     headers = make_headers(provider, api_key, oauth_access_token, account_id, stream)
@@ -936,6 +955,7 @@ async def run_point(
         top_p=top_p,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
+        thinking_budget=thinking_budget,
         ctx_size=ctx_size,
         extra_body_json=extra_body_json,
         stream=stream,
@@ -955,7 +975,6 @@ async def run_point(
                     concurrency=concurrency,
                     round_id=round_id,
                     thinking_level=thinking_level,
-                    debug_content=debug_content,
                     stream=stream,
                 )
                 for _ in range(concurrency)
@@ -1157,6 +1176,7 @@ async def run_warmup(
     prompt: str,
     thinking_level: str | None,
     thinking_key: str,
+    thinking_budget: int | None,
     max_tokens: int | None,
     temperature: float | None,
     top_p: float | None,
@@ -1165,7 +1185,6 @@ async def run_warmup(
     extra_body_json: str | None,
     warmup_runs: int,
     verbose: bool,
-    debug_content: bool,
     stream: bool,
 ) -> None:
     if warmup_runs <= 0:
@@ -1184,6 +1203,7 @@ async def run_warmup(
         top_p=top_p,
         thinking_level=thinking_level,
         thinking_key=thinking_key,
+        thinking_budget=thinking_budget,
         ctx_size=ctx_size,
         extra_body_json=extra_body_json,
         stream=stream,
@@ -1216,7 +1236,6 @@ async def run_warmup(
                 concurrency=1,
                 round_id=-(warmup_id + 1),
                 thinking_level=thinking_level,
-                debug_content=debug_content,
                 stream=stream,
             )
             if verbose or not result.ok:
@@ -1260,11 +1279,20 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         choices=["pi"],
         help="Load authentication from a local tool config instead of CLI tokens",
     )
-    parser.add_argument("--prompt", help="Prompt text for benchmark or test request")
+    parser.add_argument(
+        "--prompt",
+        help="Prompt text for benchmark or test request, or @file to load from a file",
+    )
     parser.add_argument("--prompt-file", help="Read prompt text from file")
     parser.add_argument("--thinking-level", default=None, help="Comma-separated thinking levels")
     parser.add_argument(
         "--thinking-key", default=None, help="Request field used for thinking level"
+    )
+    parser.add_argument(
+        "--thinking-budget",
+        type=int,
+        default=None,
+        help="Reasoning token budget for provider=openai-mlx",
     )
     parser.add_argument(
         "--max-tokens", type=int, default=None, help="Maximum output tokens to request"
@@ -1363,7 +1391,7 @@ async def async_main(args: argparse.Namespace) -> int:
     if args.command == "bench":
         validate_args(args)
 
-    configure_logging(args.debug, args.quiet, args.log_file)
+    configure_logging(args.debug, args.debug_content, args.quiet, args.log_file)
     if provider_alias is not None:
         LOGGER.info(
             "Resolved provider alias %s -> provider=%s api_variant=%s",
@@ -1386,7 +1414,6 @@ async def async_main(args: argparse.Namespace) -> int:
             account_id=resolved_account_id,
             stream=args.stream,
             timeout_s=args.timeout,
-            debug_content=args.debug_content,
         )
         for model_name in models:
             print(model_name)
@@ -1413,13 +1440,13 @@ async def async_main(args: argparse.Namespace) -> int:
             prompt=prompt,
             thinking_level=thinking_levels[0],
             thinking_key=args.thinking_key,
+            thinking_budget=args.thinking_budget,
             max_tokens=effective_max_tokens,
             temperature=effective_temperature,
             top_p=args.top_p,
             ctx_size=args.ctx_size,
             timeout_s=args.timeout,
             extra_body_json=args.extra_body_json,
-            debug_content=args.debug_content,
             stream=args.stream,
         )
 
@@ -1437,6 +1464,7 @@ async def async_main(args: argparse.Namespace) -> int:
         prompt=warmup_prompt,
         thinking_level=thinking_levels[0],
         thinking_key=args.thinking_key,
+        thinking_budget=args.thinking_budget,
         max_tokens=effective_max_tokens,
         temperature=effective_temperature,
         top_p=args.top_p,
@@ -1445,7 +1473,6 @@ async def async_main(args: argparse.Namespace) -> int:
         extra_body_json=args.extra_body_json,
         warmup_runs=args.warmup_runs,
         verbose=args.verbose,
-        debug_content=args.debug_content,
         stream=args.stream,
     )
 
@@ -1483,6 +1510,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 rounds=args.rounds,
                 thinking_level=thinking_level,
                 thinking_key=args.thinking_key,
+                thinking_budget=args.thinking_budget,
                 max_tokens=effective_max_tokens,
                 top_p=args.top_p,
                 temperature=effective_temperature,
@@ -1490,7 +1518,6 @@ async def async_main(args: argparse.Namespace) -> int:
                 timeout_s=args.timeout,
                 extra_body_json=args.extra_body_json,
                 verbose=args.verbose,
-                debug_content=args.debug_content,
                 stream=args.stream,
             )
             summaries.append(summary)

@@ -234,6 +234,7 @@ Notes:
 - `--api-variant` still overrides the mapped default.
 - `--api-variant default` uses OpenAI-style `reasoning_effort` for `provider=openai` when a thinking level is set.
 - `--api-variant mlx` uses `chat_template_kwargs.enable_thinking` and `chat_template_kwargs.reasoning_effort` for `provider=openai`.
+- `--thinking-budget` adds `thinking_budget` to the request payload for `provider=openai-mlx`.
 - For `provider=ollama`, `--api-variant` must stay `default`.
 - If thinking level is omitted or set to `default`, it is not sent in the request.
 - If thinking level is set to `none`, thinking is explicitly set to `none` or false
@@ -251,6 +252,7 @@ Notes:
 - `--debug-content` logs request content and raw response content as one-line debug output.
 - `--csv-file` writes the summary CSV to an explicit path.
 - `--no-csv` disables the default summary CSV output.
+- `--prompt` accepts either literal text or `@file` to load the prompt from a file.
 - `--prompt-warmup` sets the warmup prompt and defaults to `ping`.
 - Benchmark/test prompt defaults to `ping`.
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.
