@@ -258,6 +258,7 @@ Notes:
 - `--max-tokens` and `--temperature` default to `1024` and `1.0`.
 - Use `--no-max-tokens` or `--no-temperature` to omit them from requests.
 - Use the `test` subcommand to send one payload and print the response without running a benchmark.
+- The `test` subcommand also prints a `REASONING` section when the provider returns reasoning text.
 - Streaming is enabled by default for benchmark and test requests.
 - Use `--no-stream` to disable streaming.
 - `--ctx-size` is applied when supported by the target API.

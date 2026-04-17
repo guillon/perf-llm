@@ -308,6 +308,7 @@ def json_to_str(payload: Any) -> str:
         rendered = repr(payload)
     return rendered
 
+
 def log_json_content(enabled: bool, label: str, payload: Any) -> None:
     if not enabled:
         return
@@ -574,6 +575,81 @@ def extract_stream_reasoning_chunk(event_payload: dict[str, Any], provider: str)
         if event_payload.get("type") == "response.reasoning_summary_text.delta":
             delta = event_payload.get("delta")
             return delta if isinstance(delta, str) else ""
+    if provider == "ollama":
+        parts: list[str] = []
+        message = event_payload.get("message")
+        if isinstance(message, dict):
+            parts.extend(extract_text_parts(message.get("reasoning_content")))
+            parts.extend(extract_text_parts(message.get("thinking")))
+            parts.extend(extract_text_parts(message.get("reasoning")))
+        parts.extend(extract_text_parts(event_payload.get("reasoning_content")))
+        parts.extend(extract_text_parts(event_payload.get("thinking")))
+        parts.extend(extract_text_parts(event_payload.get("reasoning")))
+        return "".join(parts)
+    return ""
+
+
+def extract_response_reasoning(response_payload: dict[str, Any], provider: str) -> str:
+    if provider == "openai":
+        choices = response_payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            return ""
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            return ""
+        parts = list(extract_text_parts(message.get("reasoning_content")))
+        if parts:
+            return "".join(parts)
+        reasoning = message.get("reasoning")
+        if isinstance(reasoning, dict):
+            parts.extend(extract_text_parts(reasoning.get("summary")))
+            parts.extend(extract_text_parts(reasoning.get("text")))
+        else:
+            parts.extend(extract_text_parts(reasoning))
+        return "".join(parts)
+    if provider == "openai-codex":
+        parts: list[str] = []
+        reasoning = response_payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            parts.extend(extract_text_parts(reasoning.get("summary")))
+            parts.extend(extract_text_parts(reasoning.get("text")))
+            parts.extend(extract_text_parts(reasoning.get("content")))
+        output = response_payload.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "reasoning":
+                    parts.extend(extract_text_parts(item.get("summary")))
+                    parts.extend(extract_text_parts(item.get("content")))
+                    if isinstance(item.get("reasoning_content"), str):
+                        parts.append(item["reasoning_content"])
+                elif item.get("type") == "message":
+                    content = item.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get("type") in {"reasoning_text", "summary_text"}:
+                            text = part.get("text")
+                            if isinstance(text, str):
+                                parts.append(text)
+        return "".join(parts)
+    if provider == "ollama":
+        parts: list[str] = []
+        message = response_payload.get("message")
+        if isinstance(message, dict):
+            parts.extend(extract_text_parts(message.get("reasoning_content")))
+            parts.extend(extract_text_parts(message.get("thinking")))
+            parts.extend(extract_text_parts(message.get("reasoning")))
+        parts.extend(extract_text_parts(response_payload.get("reasoning_content")))
+        parts.extend(extract_text_parts(response_payload.get("thinking")))
+        parts.extend(extract_text_parts(response_payload.get("reasoning")))
+        return "".join(parts)
     return ""
 
 
@@ -617,8 +693,9 @@ def extract_response(response_payload: dict[str, Any], provider: str) -> str:
 
 async def collect_stream_response(
     resp: Any, provider: str, start_time: float
-) -> tuple[str, dict[str, Any] | None, int, float | None, float | None]:
+) -> tuple[str, str, dict[str, Any] | None, int, float | None, float | None]:
     response_parts: list[str] = []
+    reasoning_parts: list[str] = []
     last_payload: dict[str, Any] | None = None
     chunk_count = 0
     first_response_latency_s: float | None = None
@@ -652,9 +729,12 @@ async def collect_stream_response(
             first_token_latency_s = now - start_time
         if response_part:
             response_parts.append(response_part)
+        if reasoning_part:
+            reasoning_parts.append(reasoning_part)
 
     return (
         "".join(response_parts),
+        "".join(reasoning_parts),
         last_payload,
         chunk_count,
         first_response_latency_s,
@@ -664,10 +744,11 @@ async def collect_stream_response(
 
 async def collect_response(
     resp: Any, provider: str, stream: bool, start_time: float
-) -> tuple[str, dict[str, Any] | None, str | None, int | None, float | None, float | None]:
+) -> tuple[str, str, dict[str, Any] | None, str | None, int | None, float | None, float | None]:
     if stream:
         (
             response_text,
+            reasoning_text,
             response_payload,
             chunk_count,
             first_response_latency_s,
@@ -675,6 +756,7 @@ async def collect_response(
         ) = await collect_stream_response(resp, provider, start_time)
         return (
             response_text,
+            reasoning_text,
             response_payload,
             None,
             chunk_count,
@@ -687,11 +769,12 @@ async def collect_response(
     try:
         response_payload = json.loads(text)
     except json.JSONDecodeError:
-        return text, None, text, None, None, None
+        return text, "", None, text, None, None, None
 
     if isinstance(response_payload, dict):
         return (
             extract_response(response_payload, provider),
+            extract_response_reasoning(response_payload, provider),
             response_payload,
             text,
             None,
@@ -699,7 +782,7 @@ async def collect_response(
             None,
         )
 
-    return text, None, text, None, None, None
+    return text, "", None, text, None, None, None
 
 
 async def list_models(
@@ -783,11 +866,12 @@ async def test_request(
             if resp.status >= 400:
                 text = await resp.text()
                 LOGGER.warning("test request failed with HTTP %s", resp.status)
-                LOGGER_CONTENT.debug("  RESPONSE_JSON", json_to_str(text))
+                LOGGER_CONTENT.debug("  RESPONSE_JSON %s", json_to_str(text))
                 return 1
 
             (
                 response_text,
+                reasoning_text,
                 _,
                 _,
                 stream_chunks,
@@ -801,6 +885,8 @@ async def test_request(
                     first_response_latency_s if first_response_latency_s is not None else -1.0,
                     first_token_latency_s if first_token_latency_s is not None else -1.0,
                 )
+            if reasoning_text:
+                print(f"REASONING:\n{reasoning_text}")
             print(f"RESPONSE:\n{response_text}")
     return 0
 
@@ -845,6 +931,7 @@ async def one_request(
 
             (
                 response_text,
+                _reasoning_text,
                 response_payload,
                 raw_text,
                 stream_chunks,
