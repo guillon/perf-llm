@@ -772,7 +772,7 @@ async def test_request(
         stream=stream,
     )
 
-    print(f"prompt: {prompt}")
+    print(f"PROMPT:\n{prompt}")
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         LOGGER.debug("POST %s", url)
@@ -786,7 +786,6 @@ async def test_request(
                 LOGGER_CONTENT.debug("  RESPONSE_JSON", json_to_str(text))
                 return 1
 
-            print(f"status: {resp.status}")
             (
                 response_text,
                 _,
@@ -802,7 +801,7 @@ async def test_request(
                     first_response_latency_s if first_response_latency_s is not None else -1.0,
                     first_token_latency_s if first_token_latency_s is not None else -1.0,
                 )
-            print(f"response: {response_text}")
+            print(f"RESPONSE:\n{response_text}")
     return 0
 
 
